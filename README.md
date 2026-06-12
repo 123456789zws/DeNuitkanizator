@@ -1,2 +1,116 @@
-# DeNuitkanizator
-Анализатор Nuitka-сборок для извлечения метаданных, строк, модулей и структуры из скомпилированных .exe файлов. Не декомпилятор - не восстанавливает исходный код.
+# 🔬 DeNuitkanizator
+
+
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Nuitka](https://img.shields.io/badge/Nuitka-Analyzer-2D2D2D?style=for-the-badge&logo=python&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-1.0-blue)
+
+Утилита для **анализа** .exe‑файлов, собранных через **Nuitka**. Извлекает метаданные, строки, модули, информацию о PE‑структуре и другую полезную информацию.
+
+> **Важно:** это не декомпилятор. Nuitka компилирует Python в C, а затем в машинный код — полная обратная декомпиляция **невозможна**.
+
+---
+
+>[!NOTE] 
+>
+>### ❗ Важные замечания
+>* Результаты анализа **не гарантированы** — зависят от версии Nuitka, настроек компиляции и использования LTO.
+>* Инструмент предоставляется **«как есть»**.
+>* Не предназначен для работы с PyInstaller, cx_Freeze и аналогичными упаковщиками.
+
+## 🔍 Возможности
+
+### 🕵️ Обнаружение
+* Определяет сборку через **Nuitka** (по сигнатурам и энтропии `.rsrc`).
+* Отличает Nuitka от PyInstaller и cx_Freeze.
+* Определяет версию **Python** (3.7–3.11) по magic‑числам.
+
+### 📥 Извлечение данных
+* **Строки**: ASCII (4+/8+ символов), UTF‑16LE, UTF‑8.
+* **Модули**: имена импортированных и замороженных (`frozen`) модулей Python.
+* **Пути к исходникам**: отладочные пути из `.rdata`/`.data`.
+* **Имена переменных и функций**: идентификаторы из секций данных.
+* **Сетевые данные**: IP‑адреса, URL, email‑адреса.
+
+### 🧩 Анализ PE‑структуры
+* **Секции**: имена, размеры, энтропия, права доступа.
+* **Импорты**: все DLL и функции (включая Python C API).
+* **Экспорты**: экспортируемые функции.
+* **Хэши**: MD5, SHA1, SHA256 файла.
+* **Компилятор**: определение (MinGW GCC, MSVC, Clang/LLVM).
+* **Механизмы защиты**: DEP, ASLR, цифровая подпись.
+
+### 🗜️ Распаковка
+* **Zstandard (zstd)**: основной алгоритм сжатия Nuitka OneFile.
+* **Zlib**: поиск и распаковка альтернативных сжатых блоков.
+* Анализ секции `.rsrc` на наличие сжатых данных.
+
+### 💻 Дизассемблирование (при наличии Capstone)
+* **Точка входа (Entry Point)**: первые 4096 байт кода.
+* **Код‑секции**: первые 8192 байт каждой секции кода.
+
+### ⚠️ Поиск подозрительных элементов
+* **Anti‑debug API**: `IsDebuggerPresent`, `CheckRemoteDebuggerPresent` и др.
+* **Packed sections**: аномальное соотношение raw/virtual размеров.
+* **High entropy**: секции с высокой энтропией (возможное шифрование).
+
+## 🖼️ Скриншоты
+
+<p align="center">
+  <img src="screenshots/main_menu.png" width="700" alt="Главное меню">
+  <br><em>Главное меню — ввод пути к .exe</em>
+</p>
+
+<p align="center">
+  <img src="screenshots/analysis_process.png" width="700" alt="Процесс анализа">
+  <br><em>Процесс анализа в реальном времени</em>
+</p>
+
+<p align="center">
+  <img src="screenshots/output_folder.png" width="700" alt="Папка с результатами">
+  <br><em>Структура выходной папки с результатами</em>
+</p>
+
+<p align="center">
+  <img src="screenshots/summary.png" width="700" alt="Итоговый отчёт">
+  <br><em>Итоговый отчёт summary.txt</em>
+</p>
+
+---
+
+>[!WARNING]
+>
+>### ⚠️ Ограничения
+>
+>* **Не восстанавливает исходный Python‑код.**
+>* **Не декомпилирует машинный код обратно в Python.**
+>* **Не гарантирует 100 % извлечение всех данных.**
+>* Может пропустить часть информации при агрессивной **LTO‑оптимизации**.
+>* Не поддерживает анализ файлов, собранных с помощью **PyInstaller**, **cx_Freeze** и аналогичных инструментов.
+
+---
+
+## 📥 Установка
+
+### Способ 1: Готовый .exe
+Скачай `DeNuitkanizator.exe` из [Releases](https://github.com/2M12/DeNuitkanizator/releases) и запусти.
+
+### Способ 2: Из исходников
+```bash
+git clone https://github.com/2M12/DeNuitkanizator.git
+cd DeNuitkanizator
+pip install -r requirements.txt
+python DeNuitkanizator.py
+```
+## 🔵 Требования
+### Права администратора
+### Если скачивается .py скрипт - установка нужных библиотек
+
+## ☑️ Hash-суммы
+```bash
+MD5	блоб
+SHA-256	блоб
+```
+## 📜 Лицензия
+MIT © 2026 Mikhail (2M12) / ThreatBit
