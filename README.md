@@ -71,7 +71,7 @@
 </p>
 
 <p align="center">
-  <img src="screenshots/summary.png" width="700" alt="Итоговый отчёт">
+  <img src="summary.png" width="700" alt="Итоговый отчёт">
   <br><em>Итоговый отчёт summary.txt</em>
 </p>
 
