@@ -61,18 +61,13 @@
 ## 🖼️ Скриншоты
 
 <p align="center">
-  <img src="screenshots/main_menu.png" width="700" alt="Главное меню">
+  <img src="main_menu.png" width="700" alt="Главное меню">
   <br><em>Главное меню — ввод пути к .exe</em>
 </p>
 
 <p align="center">
-  <img src="screenshots/analysis_process.png" width="700" alt="Процесс анализа">
+  <img src="analysis_process.png" width="700" alt="Процесс анализа">
   <br><em>Процесс анализа в реальном времени</em>
-</p>
-
-<p align="center">
-  <img src="screenshots/output_folder.png" width="700" alt="Папка с результатами">
-  <br><em>Структура выходной папки с результатами</em>
 </p>
 
 <p align="center">
