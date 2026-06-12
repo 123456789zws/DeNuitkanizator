@@ -1,5 +1,8 @@
-# 🔬 DeNuitkanizator
+<p align="center">
+  <img src="logo.png" width="256" alt="Threatbit Simple Scanner">
+</p>
 
+# 🔬 DeNuitkanizator
 
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Nuitka](https://img.shields.io/badge/Nuitka-Analyzer-2D2D2D?style=for-the-badge&logo=python&logoColor=white)
