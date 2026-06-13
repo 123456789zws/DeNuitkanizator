@@ -1,19 +1,26 @@
+<div align="center">
+  
 <p align="center">
-  <img src="logo.png" width="256" alt="Threatbit Simple Scanner">
+  <img src="logo.png" width="256" alt="DeNuitkanizator">
 </p>
 
-# 🔬 DeNuitkanizator
+<br>
+<h3>🔬 DeNuitkanizator</h3>
+<h6>Утилита для анализа .exe‑файлов, собранных через Nuitka (а также PyInstaller и другие упаковщики) и других exe-файлов не на Python. Извлекает метаданные, строки, модули, информацию о PE‑структуре и другую полезную информацию.</h6>
 
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Nuitka](https://img.shields.io/badge/Nuitka-Analyzer-2D2D2D?style=for-the-badge&logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
 ![Version](https://img.shields.io/badge/version-1.0-blue)
 
-Утилита для **анализа** .exe‑файлов, собранных через **Nuitka** (а также **PyInstaller** и другие упаковщики) и других exe-файлов не на Python. Извлекает метаданные, строки, модули, информацию о PE‑структуре и другую полезную информацию.
+</div>
+
+<br>
 
 > **Важно:** это не декомпилятор. Nuitka компилирует Python в C, а затем в машинный код — полная обратная декомпиляция **невозможна**.
 ---
-## Перед использованием программы обязательно ознакомьтесь с [EULA.md - лицензионное соглашение](https://github.com/2M12/DeNuitkanizator/blob/main/EULA.md)
+> [!WARNING]
+> ## Перед использованием программы обязательно ознакомьтесь с [EULA.md — лицензионное соглашение](https://github.com/2M12/DeNuitkanizator/blob/main/EULA.md)
 ---
 
 >[!NOTE] 
