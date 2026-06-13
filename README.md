@@ -11,7 +11,7 @@
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Nuitka](https://img.shields.io/badge/Nuitka-Analyzer-2D2D2D?style=for-the-badge&logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
-![Version](https://img.shields.io/badge/version-1.0-blue)
+![Version](https://img.shields.io/badge/version-1.1-blue)
 
 <p align="center">
   <img src="thumbnail.png" width="700" alt="DeNuitkanizator">
