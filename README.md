@@ -124,8 +124,8 @@ python DeNuitkanizator.py
 
 ## ☑️ Hash-суммы
 ```bash
-MD5	0d85082e016a80d4066bf81d41bf3da1
-SHA-256	d2e3e0f2902b07cb58020a4c5c446e22c0b641a31d7baf6e49a5aeb0f65a8dbc
+MD5	dc888def9701b2cdb0c3b68dd86b4002
+SHA-256	110b33f81e7e1770049f378d4fe4e66a23669b9ff8daebe053de8fc479b17777
 ```
 ## 📜 Лицензия
 MIT © 2026 Mikhail (2M12) / ThreatBit
