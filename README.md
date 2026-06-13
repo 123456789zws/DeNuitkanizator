@@ -14,7 +14,7 @@
 ![Version](https://img.shields.io/badge/version-1.0-blue)
 
 <p align="center">
-  <img src="thumbnail.png" width="256" alt="DeNuitkanizator">
+  <img src="thumbnail.png" width="700" alt="DeNuitkanizator">
 </p>
 
 </div>
