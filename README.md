@@ -145,6 +145,12 @@ python DeNuitkanizator.py
 2. Далее введите путь .exe файла или просто напишите сразу `python DeNuitkanizator.py "путь"`.
 3. Затем начнётся анализ файла и появится результат в папке DeNuitkanizator_Output.
 4. Вы можете дальше сами рассматривать файлы. В summary.txt лежит только сводка.
+
+## Пример работы
+<p align="center">
+  <img src="example.gif" width="900" alt="DeNuitkanizator Example">
+</p>
+
 ---
 ## 🔵 Требования
 ### Права администратора
