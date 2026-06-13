@@ -10,6 +10,9 @@ import datetime
 import shutil
 import math
 import string
+import json
+import urllib.request
+import urllib.error
 from pathlib import Path
 from collections import Counter
 
@@ -33,8 +36,9 @@ except ImportError:
 from colorama import init, Fore, Back, Style
 init(autoreset=True)
 
-VERSION = "1.0"
+VERSION = "1.1"
 REPO = "github.com/2M12/DeNuitkanizator"
+GITHUB_API = "https://api.github.com/repos/2M12/DeNuitkanizator/releases/latest"
 
 PYTHON_MAGICS = {
     b'\x42\x0d\x0d\x0a': "3.7",
@@ -55,6 +59,13 @@ ANTI_DEBUG_APIS = [
     b'OutputDebugStringA', b'GetTickCount', b'QueryPerformanceCounter', b'rdtsc',
 ]
 
+ANTI_DEBUG_PATTERNS = [
+    b'\x64\xa1\x30\x00\x00\x00',  # mov eax, fs:[30h] (PEB)
+    b'\x0f\x31',                   # rdtsc
+    b'\xcd\x02',                   # int 2d (kernel debugger)
+    b'\xcd\x03',                   # int 3 (breakpoint)
+]
+
 BANNER = f"""{Fore.YELLOW}
   _____       _   _       _ _   _               _          _             
  |  __ \\     | \\ | |     (_) | | |             (_)        | |            
@@ -63,6 +74,19 @@ BANNER = f"""{Fore.YELLOW}
  | |__| |  __/ |\\  | |_| | | |_|   < (_| | | | | |/ / (_| | || (_) | |   
  |_____/ \\___|_| \\_|\\__,_|_|\\__|_|\\_\\__,_|_| |_|_/___\\__,_|\\__\\___/|_|   
                                                                          {Style.RESET_ALL}"""
+
+
+def check_for_updates():
+    try:
+        req = urllib.request.Request(GITHUB_API, headers={"User-Agent": "DeNuitkanizator"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+            latest_version = data.get("tag_name", "").lstrip("v")
+            if latest_version and latest_version != VERSION:
+                return "update", latest_version
+            return "latest", VERSION
+    except Exception:
+        return "offline", None
 
 
 class Logger:
@@ -125,6 +149,8 @@ class NuitkaDumper:
         self.rsrc_start = 0
         self.rsrc_end = 0
         self.section_ranges = {}
+        self.update_status = None
+        self.update_version = None
 
     def run(self):
         self._show_banner()
@@ -138,7 +164,16 @@ class NuitkaDumper:
     def _show_banner(self):
         print(BANNER)
         print(f"{Back.CYAN}{Fore.BLACK} INFO {Style.RESET_ALL} Created by 2M12 on Python 3.11")
-        print(f"{Back.CYAN}{Fore.BLACK} INFO {Style.RESET_ALL} This is version {VERSION}")
+        print(f"{Back.CYAN}{Fore.BLACK} INFO {Style.RESET_ALL} This is version {VERSION}", end=" ")
+        
+        self.update_status, self.update_version = check_for_updates()
+        if self.update_status == "update":
+            print(f"{Back.YELLOW}{Fore.BLACK} (New Update Available: v{self.update_version}){Style.RESET_ALL}")
+        elif self.update_status == "latest":
+            print(f"{Back.GREEN}{Fore.BLACK} (Latest version){Style.RESET_ALL}")
+        else:
+            print(f"{Back.RED}{Fore.WHITE} (Offline Mode){Style.RESET_ALL}")
+        
         print(f"{Back.CYAN}{Fore.BLACK} INFO {Style.RESET_ALL} Repository: {REPO}")
         print(f"{Back.CYAN}{Fore.BLACK} INFO {Style.RESET_ALL} Please read the instructions in the repository before using the program.")
         print(f"{Back.YELLOW}{Fore.BLACK} WARNING {Style.RESET_ALL} By using this tool, you agree to the terms in EULA.md (check Repository)")
@@ -204,6 +239,20 @@ class NuitkaDumper:
             return start <= offset < end
         return False
 
+    def _is_executable_section(self, section):
+        characteristics = section.Characteristics
+        return (characteristics & 0x20000000) != 0
+
+    def _get_arch_mode(self):
+        if not self.pe:
+            return capstone.CS_MODE_64
+        machine = self.pe.FILE_HEADER.Machine
+        if machine == 0x8664:
+            return capstone.CS_MODE_64
+        elif machine == 0x014c:
+            return capstone.CS_MODE_32
+        return capstone.CS_MODE_64
+
     def _dump_all(self):
         self._create_dirs()
         self._detect_packager()
@@ -222,6 +271,8 @@ class NuitkaDumper:
         self._dump_hashes()
         self._dump_entropy()
         self._dump_disasm()
+        self._dump_disasm_full()
+        self._dump_xrefs()
         self._dump_analysis()
         self._dump_suspicious()
         self._dump_compressed_blocks()
@@ -236,7 +287,8 @@ class NuitkaDumper:
             "Dumps/bytecode/3.10", "Dumps/bytecode/3.11",
             "Dumps/memory/py_objects", "Dumps/memory/nuitka_structs",
             "Dumps/frozen_modules", "Dumps/payloads",
-            "Strings/suspicious", "Info", "Disasm/xrefs", "Analysis",
+            "Strings/suspicious", "Info", "Disasm/xrefs", "Disasm/full", "Disasm/functions",
+            "Analysis",
             "Suspicious/encrypted_blocks", "Suspicious/compressed_blocks",
             "Suspicious/obfuscated_code", "Suspicious/anti_debug",
             "Suspicious/packed_sections",
@@ -362,11 +414,16 @@ class NuitkaDumper:
     def _extract_all_strings(self):
         self.logger.info("Extracting all readable strings...")
         strings = []
+        self._string_offsets = {}
         for match in re.finditer(b'[\x20-\x7e]{4,}', self.data):
             try:
                 s = match.group().decode('ascii', errors='replace')
                 if not self._is_garbage_string(s):
                     strings.append(s)
+                    offset = match.start()
+                    if s not in self._string_offsets:
+                        self._string_offsets[s] = []
+                    self._string_offsets[s].append(offset)
             except:
                 pass
         self.extracted_strings = list(set(strings))
@@ -771,7 +828,8 @@ class NuitkaDumper:
             for sec in self.pe.sections:
                 name = sec.Name.decode('utf-8', errors='replace').strip('\x00')
                 ent = self._calc_entropy(sec.get_data()) if sec.SizeOfRawData > 0 else 0
-                sec_info.append(f"{name}: VA=0x{sec.VirtualAddress:08x} RawSize={sec.SizeOfRawData:,} VirtSize={sec.Misc_VirtualSize:,} Entropy={ent:.2f}/8.0 Rights=0x{sec.Characteristics:08x}")
+                exec_flag = "EXEC" if self._is_executable_section(sec) else ""
+                sec_info.append(f"{name}: VA=0x{sec.VirtualAddress:08x} RawSize={sec.SizeOfRawData:,} VirtSize={sec.Misc_VirtualSize:,} Entropy={ent:.2f}/8.0 Rights=0x{sec.Characteristics:08x} {exec_flag}")
             self._write_list(info_dir / "sections.txt", sec_info)
 
             imports = []
@@ -863,11 +921,13 @@ class NuitkaDumper:
             return
         if not self.pe:
             return
-        self.logger.info("Disassembling...")
+        self.logger.info("Disassembling entry point and code sections...")
         disasm_dir = self.output_dir / "Disasm"
 
         try:
-            md_x86 = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+            arch_mode = self._get_arch_mode()
+            md = capstone.Cs(capstone.CS_ARCH_X86, arch_mode)
+            md.detail = True
 
             ep_rva = self.pe.OPTIONAL_HEADER.AddressOfEntryPoint
             ep_offset = self.pe.get_offset_from_rva(ep_rva)
@@ -877,9 +937,11 @@ class NuitkaDumper:
             if ep_offset and ep_offset + 4096 <= len(self.data):
                 code = self.data[ep_offset:ep_offset + 4096]
                 lines = []
-                for insn in md_x86.disasm(code, ep_rva + self.pe.OPTIONAL_HEADER.ImageBase):
-                    lines.append(f"0x{insn.address:x}: {insn.mnemonic} {insn.op_str}")
+                for insn in md.disasm(code, ep_rva + self.pe.OPTIONAL_HEADER.ImageBase):
+                    comment = self._get_insn_comment(insn, code)
+                    lines.append(f"0x{insn.address:x}: {insn.mnemonic:8s} {insn.op_str:30s} {comment}")
                 self._write_list(disasm_dir / "entry_point.asm", lines)
+                self.logger.info(f"  Entry point: {len(lines)} instructions")
 
             for section in self.pe.sections:
                 name = section.Name.decode('utf-8', errors='replace').strip('\x00')
@@ -887,13 +949,103 @@ class NuitkaDumper:
                     try:
                         data = section.get_data()[:8192]
                         lines = []
-                        for insn in md_x86.disasm(data, section.VirtualAddress + self.pe.OPTIONAL_HEADER.ImageBase):
-                            lines.append(f"0x{insn.address:x}: {insn.mnemonic} {insn.op_str}")
+                        for insn in md.disasm(data, section.VirtualAddress + self.pe.OPTIONAL_HEADER.ImageBase):
+                            comment = self._get_insn_comment(insn, data)
+                            lines.append(f"0x{insn.address:x}: {insn.mnemonic:8s} {insn.op_str:30s} {comment}")
                         self._write_list(disasm_dir / f"section_{name}.asm", lines[:500])
                     except:
                         pass
         except Exception as e:
             self.logger.warning(f"  Disassembly failed: {e}")
+
+    def _dump_disasm_full(self):
+        if capstone is None:
+            return
+        if not self.pe:
+            return
+        self.logger.info("Full disassembly of all executable sections...")
+        full_dir = self.output_dir / "Disasm" / "full"
+
+        try:
+            arch_mode = self._get_arch_mode()
+            md = capstone.Cs(capstone.CS_ARCH_X86, arch_mode)
+            md.detail = True
+
+            for section in self.pe.sections:
+                name = section.Name.decode('utf-8', errors='replace').strip('\x00')
+                if self._is_executable_section(section):
+                    try:
+                        data = section.get_data()
+                        lines = []
+                        for insn in md.disasm(data, section.VirtualAddress + self.pe.OPTIONAL_HEADER.ImageBase):
+                            comment = self._get_insn_comment(insn, data)
+                            lines.append(f"0x{insn.address:x}: {insn.mnemonic:8s} {insn.op_str:30s} {comment}")
+                        fname = full_dir / f"{name}_full.asm"
+                        self._write_list(fname, lines)
+                        self.logger.info(f"  Section {name}: {len(lines)} instructions")
+                    except Exception as e:
+                        self.logger.warning(f"  Failed full disasm of {name}: {e}")
+        except Exception as e:
+            self.logger.warning(f"  Full disassembly failed: {e}")
+
+    def _dump_xrefs(self):
+        if capstone is None:
+            return
+        if not self.pe:
+            return
+        if not hasattr(self, '_string_offsets') or not self._string_offsets:
+            return
+        self.logger.info("Building cross-references (xrefs)...")
+        xrefs_dir = self.output_dir / "Disasm" / "xrefs"
+
+        try:
+            arch_mode = self._get_arch_mode()
+            md = capstone.Cs(capstone.CS_ARCH_X86, arch_mode)
+            md.detail = True
+
+            all_xrefs = []
+
+            for section in self.pe.sections:
+                if not self._is_executable_section(section):
+                    continue
+                try:
+                    name = section.Name.decode('utf-8', errors='replace').strip('\x00')
+                    data = section.get_data()
+                    for insn in md.disasm(data, section.VirtualAddress + self.pe.OPTIONAL_HEADER.ImageBase):
+                        if insn.mnemonic in ['lea', 'mov', 'push']:
+                            for operand in insn.operands:
+                                if operand.type == capstone.x86.X86_OP_MEM and operand.mem.disp > 0:
+                                    disp = operand.mem.disp
+                                    image_base = self.pe.OPTIONAL_HEADER.ImageBase
+                                    target_rva = disp - image_base
+                                    if 0 <= target_rva < len(self.data):
+                                        for s, offsets in self._string_offsets.items():
+                                            for off in offsets:
+                                                if abs(off - target_rva) < 8:
+                                                    all_xrefs.append(f"0x{insn.address:x}: {insn.mnemonic} {insn.op_str} -> STRING @ 0x{off:x}: \"{s[:60]}\"")
+                except:
+                    pass
+
+            self._write_list(xrefs_dir / "string_xrefs.txt", all_xrefs[:10000])
+            self.logger.info(f"  String xrefs found: {len(all_xrefs)}")
+        except Exception as e:
+            self.logger.warning(f"  Xrefs failed: {e}")
+
+    def _get_insn_comment(self, insn, code):
+        comments = []
+        for anti_debug_pattern in ANTI_DEBUG_PATTERNS:
+            offset = insn.address - (self.pe.OPTIONAL_HEADER.ImageBase if self.pe else 0)
+            if offset >= 0 and offset + len(anti_debug_pattern) <= len(code):
+                if code[offset:offset + len(anti_debug_pattern)] == anti_debug_pattern:
+                    comments.append("[ANTI-DEBUG]")
+        if insn.mnemonic == 'call':
+            if insn.op_str.startswith('0x'):
+                comments.append("[CALL]")
+        elif insn.mnemonic in ['jmp', 'je', 'jne', 'jz', 'jnz', 'jg', 'jl', 'jge', 'jle']:
+            comments.append("[JMP]")
+        elif insn.mnemonic == 'ret':
+            comments.append("[RET]")
+        return "; ".join(comments) if comments else ""
 
     def _dump_analysis(self):
         self.logger.info("Running analysis...")
@@ -1102,6 +1254,17 @@ class NuitkaDumper:
                 except:
                     ent = 0.0
                 summary.append(f"{name:<12} {sec.SizeOfRawData:>10,}  {ent:.1f}")
+
+        summary.append("")
+        summary.append("─" * 54)
+        summary.append(" DISASM")
+        summary.append("─" * 54)
+        if capstone:
+            summary.append(f"Disassembler:           Capstone (active)")
+            summary.append(f"Full disasm:            Disasm/full/")
+            summary.append(f"Xrefs:                  Disasm/xrefs/string_xrefs.txt")
+        else:
+            summary.append(f"Disassembler:           Not available")
 
         summary.append("")
         summary.append("─" * 54)
