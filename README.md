@@ -5,8 +5,8 @@
 </p>
 
 <br>
-<h3>🔬 DeNuitkanizator</h3>
-<h6>Утилита для анализа .exe‑файлов, собранных через Nuitka (а также PyInstaller и другие упаковщики) и других exe-файлов не на Python. Извлекает метаданные, строки, модули, информацию о PE‑структуре и другую полезную информацию.</h6>
+<h1>🔬 DeNuitkanizator</h1>
+<h4>Утилита для анализа .exe‑файлов, собранных через Nuitka (а также PyInstaller и другие упаковщики) и других exe-файлов не на Python. Извлекает метаданные, строки, модули, информацию о PE‑структуре и другую полезную информацию.</h4>
 
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Nuitka](https://img.shields.io/badge/Nuitka-Analyzer-2D2D2D?style=for-the-badge&logo=python&logoColor=white)
