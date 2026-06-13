@@ -13,6 +13,10 @@
 ![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
 ![Version](https://img.shields.io/badge/version-1.0-blue)
 
+<p align="center">
+  <img src="thumbnail.png" width="256" alt="DeNuitkanizator">
+</p>
+
 </div>
 
 <br>
