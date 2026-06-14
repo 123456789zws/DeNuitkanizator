@@ -22,7 +22,7 @@
 ---
 >[!WARNING] 
 >
-> ## 🇬🇧 Not for an English audience
+> ## 🇷🇺 Not for an English audience
 > If you are an Russian audience, then read [README.md](https://github.com/2M12/DeNuitkanizator/blob/main/README.md)
 
 ## ❓ Why you need this
