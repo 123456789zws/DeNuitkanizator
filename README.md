@@ -21,6 +21,12 @@
 
 <br>
 
+---
+>[!WARNING] 
+>
+> ## 🇬🇧 Not for a Russian audience
+> If you are an English audience, then read [README-en.md](https://github.com/2M12/DeNuitkanizator/blob/main/README-en.md)
+
 ## ❓ Зачем это нужно
 
 **Nuitka** компилирует Python в машинный код. Ваш `.py` становится нативным `.exe`, и заглянуть внутрь стандартными средствами уже нельзя. PyInstaller ещё можно распаковать, а Nuitka — нет.
