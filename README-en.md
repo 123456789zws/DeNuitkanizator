@@ -43,7 +43,7 @@
 ---
 
 > [!WARNING]
-> ## Before using the program, please read the [EULA.md — End User License Agreement](https://github.com/2M12/DeNuitkanizator/blob/main/EULA.md)
+> ## Before using the program, please read the [EULA.md — End User License Agreement](https://github.com/2M12/DeNuitkanizator/blob/main/EULA-en.md)
 
 ---
 
