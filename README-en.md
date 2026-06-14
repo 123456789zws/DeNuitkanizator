@@ -11,6 +11,10 @@
   ![Nuitka](https://img.shields.io/badge/Nuitka-Analyzer-2D2D2D?style=for-the-badge&logo=python&logoColor=white)
   ![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
   ![Version](https://img.shields.io/badge/version-1.1-blue)
+  ![GitHub commit activity](https://img.shields.io/github/commit-activity/m/2M12/DeNuitkanizator?style=for-the-badge)
+![GitHub stars](https://img.shields.io/github/stars/2M12/DeNuitkanizator?style=for-the-badge)
+![GitHub watchers](https://img.shields.io/github/watchers/2M12/DeNuitkanizator?style=for-the-badge)
+![GitHub repo size](https://img.shields.io/github/repo-size/2M12/DeNuitkanizator?style=for-the-badge)
 
   <p align="center">
     <img src="thumbnail.png" width="700" alt="DeNuitkanizator">
