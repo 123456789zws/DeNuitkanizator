@@ -33,10 +33,22 @@ try:
 except ImportError:
     HAS_ZSTD = False
 
+try:
+    import lzma
+    HAS_LZMA = True
+except ImportError:
+    HAS_LZMA = False
+
+try:
+    import lz4.frame
+    HAS_LZ4 = True
+except ImportError:
+    HAS_LZ4 = False
+
 from colorama import init, Fore, Back, Style
 init(autoreset=True)
 
-VERSION = "1.1"
+VERSION = "1.2"
 REPO = "github.com/2M12/DeNuitkanizator"
 GITHUB_API = "https://api.github.com/repos/2M12/DeNuitkanizator/releases/latest"
 
@@ -53,6 +65,11 @@ NUITKA_SIGNATURES = [
     b'Nuitka_Onefile', b'Nuitka-Scons', b'__compiled__', b'frozen_modules',
 ]
 
+PYINSTALLER_SIGNATURES = [
+    b'MEI', b'PYZ-00.pyz', b'pyinstaller', b'PyInstaller',
+    b'python3', b'python2', b'PYTHON3', b'PYTHON2',
+]
+
 ANTI_DEBUG_APIS = [
     b'IsDebuggerPresent', b'CheckRemoteDebuggerPresent',
     b'NtQueryInformationProcess', b'NtSetInformationThread',
@@ -60,10 +77,10 @@ ANTI_DEBUG_APIS = [
 ]
 
 ANTI_DEBUG_PATTERNS = [
-    b'\x64\xa1\x30\x00\x00\x00',  # mov eax, fs:[30h] (PEB)
-    b'\x0f\x31',                   # rdtsc
-    b'\xcd\x02',                   # int 2d (kernel debugger)
-    b'\xcd\x03',                   # int 3 (breakpoint)
+    b'\x64\xa1\x30\x00\x00\x00',
+    b'\x0f\x31',
+    b'\xcd\x02',
+    b'\xcd\x03',
 ]
 
 BANNER = f"""{Fore.YELLOW}
@@ -132,6 +149,7 @@ class NuitkaDumper:
         self.pe = None
         self.detected_packager = None
         self.detected_nuitka = False
+        self.detected_pyinstaller = False
         self.detected_python = None
         self.found_bytecodes = []
         self.found_frozen_modules = []
@@ -210,6 +228,10 @@ class NuitkaDumper:
         self.logger.info(f"File size: {len(self.data):,} bytes")
         if not HAS_ZSTD:
             self.logger.warning("zstandard not installed. Install: pip install zstandard")
+        if not HAS_LZ4:
+            self.logger.warning("lz4 not installed. Install: pip install lz4")
+        if not HAS_LZMA:
+            self.logger.warning("lzma not available. This should be built-in, check your Python installation.")
 
         try:
             self.pe = pefile.PE(data=self.data)
@@ -272,7 +294,9 @@ class NuitkaDumper:
         self._dump_entropy()
         self._dump_disasm()
         self._dump_disasm_full()
+        self._dump_disasm_functions()
         self._dump_xrefs()
+        self._dump_call_graph()
         self._dump_analysis()
         self._dump_suspicious()
         self._dump_compressed_blocks()
@@ -305,6 +329,11 @@ class NuitkaDumper:
             if sig in self.data:
                 nuitka_hits += 1
 
+        pyinstaller_hits = 0
+        for sig in PYINSTALLER_SIGNATURES:
+            if sig in self.data:
+                pyinstaller_hits += 1
+
         if nuitka_hits >= 1:
             self.detected_packager = "Nuitka"
             self.detected_nuitka = True
@@ -313,13 +342,13 @@ class NuitkaDumper:
             self.detected_packager = "Nuitka (detected by .rsrc entropy)"
             self.detected_nuitka = True
             self.logger.info(f"  Detected: Nuitka (high entropy .rsrc: {self.rsrc_entropy:.2f}/8.0, size: {len(self.rsrc_data):,} bytes)")
-        elif b'MEI' in self.data[:100] or b'PYZ-00.pyz' in self.data:
+        elif pyinstaller_hits >= 1:
             self.detected_packager = "PyInstaller"
-            self.logger.warning("  Detected: PyInstaller (not Nuitka)")
-            self.logger.warning("  Error 5: You are not using Nuitka.")
+            self.detected_pyinstaller = True
+            self.logger.info(f"  Detected: PyInstaller ({pyinstaller_hits} signatures matched)")
         elif b'cx_Freeze' in self.data:
             self.detected_packager = "cx_Freeze"
-            self.logger.warning("  Detected: cx_Freeze (not Nuitka)")
+            self.logger.info(f"  Detected: cx_Freeze")
         else:
             self.detected_packager = "Unknown"
             self.logger.info("  Packager not identified")
@@ -720,6 +749,10 @@ class NuitkaDumper:
                 self.logger.warning("  zstandard not available, install: pip install zstandard")
 
             decompressed_count += self._try_zlib_decompress(self.rsrc_data, payload_dir, ".rsrc")
+            if HAS_LZMA:
+                decompressed_count += self._try_lzma_decompress(self.rsrc_data, payload_dir)
+            if HAS_LZ4:
+                decompressed_count += self._try_lz4_decompress(self.rsrc_data, payload_dir)
 
         if decompressed_count == 0:
             self.logger.info("  No payloads decompressed from .rsrc")
@@ -786,6 +819,66 @@ class NuitkaDumper:
                     except:
                         pass
                 offset += len(sig)
+        return count
+
+    def _try_lzma_decompress(self, data, payload_dir):
+        lzma_magic = b'\xfd7zXZ\x00'
+        count = 0
+        offset = 0
+        tried = set()
+        while True:
+            offset = data.find(lzma_magic, offset)
+            if offset == -1:
+                break
+            if offset in tried:
+                offset += len(lzma_magic)
+                continue
+            tried.add(offset)
+            for window in [65536, 131072, 262144, 524288, 1048576]:
+                if offset + window > len(data):
+                    continue
+                chunk = data[offset:offset + window]
+                try:
+                    decompressed = lzma.decompress(chunk)
+                    if len(decompressed) > 4096:
+                        fname = payload_dir / f"lzma_decompressed_{offset:08x}.bin"
+                        fname.write_bytes(decompressed)
+                        count += 1
+                        self.logger.info(f"  [PAYLOAD LZMA] Decompressed {len(decompressed):,} bytes at 0x{offset:08x}")
+                        self._scan_data_for_patterns(decompressed)
+                except:
+                    pass
+            offset += len(lzma_magic)
+        return count
+
+    def _try_lz4_decompress(self, data, payload_dir):
+        lz4_magic = b'\x04\x22\x4d\x18'
+        count = 0
+        offset = 0
+        tried = set()
+        while True:
+            offset = data.find(lz4_magic, offset)
+            if offset == -1:
+                break
+            if offset in tried:
+                offset += len(lz4_magic)
+                continue
+            tried.add(offset)
+            for window in [65536, 131072, 262144, 524288, 1048576]:
+                if offset + window > len(data):
+                    continue
+                chunk = data[offset:offset + window]
+                try:
+                    decompressed = lz4.frame.decompress(chunk)
+                    if len(decompressed) > 4096:
+                        fname = payload_dir / f"lz4_decompressed_{offset:08x}.bin"
+                        fname.write_bytes(decompressed)
+                        count += 1
+                        self.logger.info(f"  [PAYLOAD LZ4] Decompressed {len(decompressed):,} bytes at 0x{offset:08x}")
+                        self._scan_data_for_patterns(decompressed)
+                except:
+                    pass
+            offset += len(lz4_magic)
         return count
 
     def _dump_info(self):
@@ -878,6 +971,8 @@ class NuitkaDumper:
             (info_dir / "python_version.txt").write_text(f"Python version: {self.detected_python}")
         if self.detected_nuitka:
             (info_dir / "nuitka_version.txt").write_text(f"Nuitka: detected\nPackager: {self.detected_packager}")
+        if self.detected_pyinstaller:
+            (info_dir / "pyinstaller_version.txt").write_text(f"PyInstaller: detected\nPackager: {self.detected_packager}")
 
     def _dump_hashes(self):
         self.logger.info("Calculating hashes...")
@@ -988,6 +1083,92 @@ class NuitkaDumper:
         except Exception as e:
             self.logger.warning(f"  Full disassembly failed: {e}")
 
+    def _dump_disasm_functions(self):
+        if capstone is None:
+            return
+        if not self.pe:
+            return
+        self.logger.info("Extracting function boundaries...")
+        func_dir = self.output_dir / "Disasm" / "functions"
+
+        try:
+            arch_mode = self._get_arch_mode()
+            md = capstone.Cs(capstone.CS_ARCH_X86, arch_mode)
+            md.detail = True
+
+            function_starts = set()
+
+            if self.pe:
+                ep_rva = self.pe.OPTIONAL_HEADER.AddressOfEntryPoint
+                function_starts.add(ep_rva)
+
+            for section in self.pe.sections:
+                if not self._is_executable_section(section):
+                    continue
+                try:
+                    name = section.Name.decode('utf-8', errors='replace').strip('\x00')
+                    data = section.get_data()
+                    for insn in md.disasm(data, section.VirtualAddress + self.pe.OPTIONAL_HEADER.ImageBase):
+                        if insn.mnemonic == 'call':
+                            try:
+                                target = int(insn.op_str, 16)
+                                if target > 0 and target < self.pe.OPTIONAL_HEADER.ImageBase + 0x10000000:
+                                    function_starts.add(target)
+                            except:
+                                pass
+                        if insn.mnemonic == 'jmp':
+                            try:
+                                target = int(insn.op_str, 16)
+                                if target > 0 and target < self.pe.OPTIONAL_HEADER.ImageBase + 0x10000000:
+                                    function_starts.add(target)
+                            except:
+                                pass
+                except:
+                    pass
+
+            func_list = sorted(function_starts)
+            self._write_list(func_dir / "function_addresses.txt", [f"0x{addr:016x}" for addr in func_list])
+            self.logger.info(f"  Function candidates: {len(func_list)}")
+        except Exception as e:
+            self.logger.warning(f"  Function extraction failed: {e}")
+
+    def _dump_call_graph(self):
+        if capstone is None:
+            return
+        if not self.pe:
+            return
+        self.logger.info("Building call graph...")
+        cg_dir = self.output_dir / "Disasm" / "xrefs"
+
+        try:
+            arch_mode = self._get_arch_mode()
+            md = capstone.Cs(capstone.CS_ARCH_X86, arch_mode)
+            md.detail = True
+
+            call_graph = []
+            ep_rva = self.pe.OPTIONAL_HEADER.AddressOfEntryPoint
+
+            for section in self.pe.sections:
+                if not self._is_executable_section(section):
+                    continue
+                try:
+                    data = section.get_data()
+                    for insn in md.disasm(data, section.VirtualAddress + self.pe.OPTIONAL_HEADER.ImageBase):
+                        if insn.mnemonic == 'call':
+                            try:
+                                target = int(insn.op_str, 16)
+                                if target > 0:
+                                    call_graph.append(f"0x{insn.address:016x} -> 0x{target:016x}")
+                            except:
+                                pass
+                except:
+                    pass
+
+            self._write_list(cg_dir / "call_graph.txt", call_graph[:10000])
+            self.logger.info(f"  Call graph entries: {len(call_graph)}")
+        except Exception as e:
+            self.logger.warning(f"  Call graph failed: {e}")
+
     def _dump_xrefs(self):
         if capstone is None:
             return
@@ -1009,7 +1190,6 @@ class NuitkaDumper:
                 if not self._is_executable_section(section):
                     continue
                 try:
-                    name = section.Name.decode('utf-8', errors='replace').strip('\x00')
                     data = section.get_data()
                     for insn in md.disasm(data, section.VirtualAddress + self.pe.OPTIONAL_HEADER.ImageBase):
                         if insn.mnemonic in ['lea', 'mov', 'push']:
@@ -1039,7 +1219,11 @@ class NuitkaDumper:
                 if code[offset:offset + len(anti_debug_pattern)] == anti_debug_pattern:
                     comments.append("[ANTI-DEBUG]")
         if insn.mnemonic == 'call':
-            if insn.op_str.startswith('0x'):
+            try:
+                target = int(insn.op_str, 16)
+                if target > 0:
+                    comments.append("[CALL]")
+            except:
                 comments.append("[CALL]")
         elif insn.mnemonic in ['jmp', 'je', 'jne', 'jz', 'jnz', 'jg', 'jl', 'jge', 'jle']:
             comments.append("[JMP]")
@@ -1115,7 +1299,7 @@ class NuitkaDumper:
             b'\x78\x9c': 'zlib_default', b'\x78\x01': 'zlib_none',
             b'\x78\xda': 'zlib_best', b'\x1f\x8b\x08': 'gzip',
             b'BZh': 'bzip2', b'\xfd7zXZ\x00': 'lzma',
-            b'\x50\x4b\x03\x04': 'zip',
+            b'\x50\x4b\x03\x04': 'zip', b'\x04\x22\x4d\x18': 'lz4',
         }
 
         search_data = self.rsrc_data if self.rsrc_data else self.data
@@ -1262,16 +1446,26 @@ class NuitkaDumper:
         if capstone:
             summary.append(f"Disassembler:           Capstone (active)")
             summary.append(f"Full disasm:            Disasm/full/")
-            summary.append(f"Xrefs:                  Disasm/xrefs/string_xrefs.txt")
+            summary.append(f"Functions:              Disasm/functions/function_addresses.txt")
+            summary.append(f"Call graph:             Disasm/xrefs/call_graph.txt")
+            summary.append(f"String xrefs:           Disasm/xrefs/string_xrefs.txt")
         else:
             summary.append(f"Disassembler:           Not available")
 
         summary.append("")
         summary.append("─" * 54)
+        summary.append(" COMPRESSION")
+        summary.append("─" * 54)
+        summary.append(f"zstd available:         {str(HAS_ZSTD).lower()}")
+        summary.append(f"lz4 available:          {str(HAS_LZ4).lower()}")
+        summary.append(f"lzma available:         {str(HAS_LZMA).lower()}")
+
+        summary.append("")
+        summary.append("─" * 54)
         summary.append(" WARNINGS")
         summary.append("─" * 54)
-        if not self.detected_nuitka and self.detected_packager and self.detected_packager != "Nuitka" and "Nuitka" not in str(self.detected_packager):
-            summary.append(f"[WARNING] Not a Nuitka file. Detected: {self.detected_packager}")
+        if not self.detected_nuitka and not self.detected_pyinstaller and self.detected_packager and self.detected_packager != "Nuitka" and self.detected_packager != "PyInstaller" and "Nuitka" not in str(self.detected_packager) and "PyInstaller" not in str(self.detected_packager):
+            summary.append(f"[WARNING] Unknown packer. Detected: {self.detected_packager}")
         if self.pe:
             for sec in self.pe.sections:
                 try:
@@ -1283,6 +1477,8 @@ class NuitkaDumper:
                     pass
         if not HAS_ZSTD:
             summary.append("[WARNING] zstandard not installed. Install: pip install zstandard")
+        if not HAS_LZ4:
+            summary.append("[WARNING] lz4 not installed. Install: pip install lz4")
 
         summary.append("")
         summary.append("─" * 54)
