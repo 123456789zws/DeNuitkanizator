@@ -53,7 +53,7 @@
 
 > [!CAUTION]
 > ### ❗ About fake copies
-> The only official sources are [GitHub](https://github.com/2M12), [Дзен](https://dzen.ru/threatbit), and [YouTube](https://www.youtube.com/@ThreatBit_official). I do not publish anything on Telegram channels/groups or other platforms — they are not official. If you come across something outside this repository, it’s a fake copy, which often contains malware.
+> Official sources are only those that are in the profile [2M12](https://github.com/2M12/2M12/blob/main/README.md ). I do not post anything on Telegram channels/groups or other sources (they are not official). If you come across something outside of this repository, these are false copies that often contain malware.
 
 >[!NOTE]
 > ### ❗ Important notes
