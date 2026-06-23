@@ -48,7 +48,7 @@ except ImportError:
 from colorama import init, Fore, Back, Style
 init(autoreset=True)
 
-VERSION = "1.2"
+VERSION = "1.3"
 REPO = "github.com/2M12/DeNuitkanizator"
 GITHUB_API = "https://api.github.com/repos/2M12/DeNuitkanizator/releases/latest"
 
@@ -66,8 +66,11 @@ NUITKA_SIGNATURES = [
 ]
 
 PYINSTALLER_SIGNATURES = [
-    b'MEI', b'PYZ-00.pyz', b'pyinstaller', b'PyInstaller',
-    b'python3', b'python2', b'PYTHON3', b'PYTHON2',
+    b'pyinstaller', b'PyInstaller', b'MEI', b'PYZ-00.pyz',
+]
+
+CX_FREEZE_SIGNATURES = [
+    b'cx_Freeze', b'cx-freeze',
 ]
 
 ANTI_DEBUG_APIS = [
@@ -82,6 +85,21 @@ ANTI_DEBUG_PATTERNS = [
     b'\xcd\x02',
     b'\xcd\x03',
 ]
+
+YARA_TEMPLATE = """rule DeNuitkanizator_AutoGen_{timestamp}
+{{
+    meta:
+        description = "Auto-generated rule for {filename}"
+        author = "DeNuitkanizator v{VERSION}"
+        date = "{date}"
+        packager = "{packager}"
+        sha256 = "{sha256}"
+    strings:
+{strings}
+    condition:
+        {condition}
+}}
+"""
 
 BANNER = f"""{Fore.YELLOW}
   _____       _   _       _ _   _               _          _             
@@ -150,6 +168,7 @@ class NuitkaDumper:
         self.detected_packager = None
         self.detected_nuitka = False
         self.detected_pyinstaller = False
+        self.detected_cx_freeze = False
         self.detected_python = None
         self.found_bytecodes = []
         self.found_frozen_modules = []
@@ -169,6 +188,8 @@ class NuitkaDumper:
         self.section_ranges = {}
         self.update_status = None
         self.update_version = None
+        self.iat_addresses = {}
+        self.import_name_by_address = {}
 
     def run(self):
         self._show_banner()
@@ -195,6 +216,7 @@ class NuitkaDumper:
         print(f"{Back.CYAN}{Fore.BLACK} INFO {Style.RESET_ALL} Repository: {REPO}")
         print(f"{Back.CYAN}{Fore.BLACK} INFO {Style.RESET_ALL} Please read the instructions in the repository before using the program.")
         print(f"{Back.YELLOW}{Fore.BLACK} WARNING {Style.RESET_ALL} By using this tool, you agree to the terms in EULA.md (check Repository)")
+        print(f"{Back.YELLOW}{Fore.BLACK} WARNING {Style.RESET_ALL} YARA-the rules are in W.I.P (and packager detection). Expect the v1.3.1 update, where there will be a fix and refinement.")
         print()
 
     def _prompt_path(self):
@@ -236,6 +258,7 @@ class NuitkaDumper:
         try:
             self.pe = pefile.PE(data=self.data)
             self.logger.info("PE file detected")
+            self._build_iat_map()
             for section in self.pe.sections:
                 try:
                     section_data = section.get_data()
@@ -254,6 +277,29 @@ class NuitkaDumper:
         except Exception:
             self.logger.info("Not a valid PE file, continuing with raw data")
             self.all_sections_data = self.data
+
+    def _build_iat_map(self):
+        self.iat_addresses = {}
+        self.import_name_by_address = {}
+        if not self.pe:
+            return
+        try:
+            if hasattr(self.pe, 'DIRECTORY_ENTRY_IMPORT'):
+                for entry in self.pe.DIRECTORY_ENTRY_IMPORT:
+                    dll_name = entry.dll.decode('utf-8', errors='replace')
+                    for imp in entry.imports:
+                        if imp.name:
+                            func_name = imp.name.decode('utf-8', errors='replace')
+                        else:
+                            func_name = f"ord_{imp.ordinal}"
+                        full_name = f"{dll_name}:{func_name}"
+                        if imp.address:
+                            self.import_name_by_address[imp.address] = full_name
+                            self.iat_addresses[imp.address] = full_name
+                        if imp.thunk_rva:
+                            self.import_name_by_address[imp.thunk_rva + self.pe.OPTIONAL_HEADER.ImageBase] = full_name
+        except:
+            pass
 
     def _is_in_section(self, offset, section_name):
         if section_name in self.section_ranges:
@@ -296,10 +342,12 @@ class NuitkaDumper:
         self._dump_disasm_full()
         self._dump_disasm_functions()
         self._dump_xrefs()
+        self._dump_import_xrefs()
         self._dump_call_graph()
         self._dump_analysis()
         self._dump_suspicious()
         self._dump_compressed_blocks()
+        self._dump_yara_rules()
         self._dump_string_files()
         self._write_log_copy()
 
@@ -334,6 +382,19 @@ class NuitkaDumper:
             if sig in self.data:
                 pyinstaller_hits += 1
 
+        cx_freeze_hits = 0
+        for sig in CX_FREEZE_SIGNATURES:
+            if sig in self.data:
+                cx_freeze_hits += 1
+
+        has_python_dlls = False
+        if self.pe and hasattr(self.pe, 'DIRECTORY_ENTRY_IMPORT'):
+            for entry in self.pe.DIRECTORY_ENTRY_IMPORT:
+                dll_name = entry.dll.decode('utf-8', errors='replace').lower()
+                if 'python' in dll_name:
+                    has_python_dlls = True
+                    break
+
         if nuitka_hits >= 1:
             self.detected_packager = "Nuitka"
             self.detected_nuitka = True
@@ -342,15 +403,20 @@ class NuitkaDumper:
             self.detected_packager = "Nuitka (detected by .rsrc entropy)"
             self.detected_nuitka = True
             self.logger.info(f"  Detected: Nuitka (high entropy .rsrc: {self.rsrc_entropy:.2f}/8.0, size: {len(self.rsrc_data):,} bytes)")
-        elif pyinstaller_hits >= 1:
+        elif pyinstaller_hits >= 1 and has_python_dlls:
             self.detected_packager = "PyInstaller"
             self.detected_pyinstaller = True
-            self.logger.info(f"  Detected: PyInstaller ({pyinstaller_hits} signatures matched)")
-        elif b'cx_Freeze' in self.data:
+            self.logger.info(f"  Detected: PyInstaller ({pyinstaller_hits} signatures matched, Python DLL found)")
+        elif cx_freeze_hits >= 1:
             self.detected_packager = "cx_Freeze"
-            self.logger.info(f"  Detected: cx_Freeze")
+            self.detected_cx_freeze = True
+            self.logger.info(f"  Detected: cx_Freeze ({cx_freeze_hits} signatures matched)")
+        elif pyinstaller_hits >= 1:
+            self.detected_packager = "PyInstaller (low confidence)"
+            self.detected_pyinstaller = True
+            self.logger.warning(f"  Detected: PyInstaller (NOT EXACTLY: signatures matched but no Python DLL found, low confidence)")
         else:
-            self.detected_packager = "Unknown"
+            self.detected_packager = "Unknown (native or other)"
             self.logger.info("  Packager not identified")
 
     def _dump_sections(self):
@@ -973,6 +1039,8 @@ class NuitkaDumper:
             (info_dir / "nuitka_version.txt").write_text(f"Nuitka: detected\nPackager: {self.detected_packager}")
         if self.detected_pyinstaller:
             (info_dir / "pyinstaller_version.txt").write_text(f"PyInstaller: detected\nPackager: {self.detected_packager}")
+        if self.detected_cx_freeze:
+            (info_dir / "cx_freeze_version.txt").write_text(f"cx_Freeze: detected\nPackager: {self.detected_packager}")
 
     def _dump_hashes(self):
         self.logger.info("Calculating hashes...")
@@ -1106,7 +1174,6 @@ class NuitkaDumper:
                 if not self._is_executable_section(section):
                     continue
                 try:
-                    name = section.Name.decode('utf-8', errors='replace').strip('\x00')
                     data = section.get_data()
                     for insn in md.disasm(data, section.VirtualAddress + self.pe.OPTIONAL_HEADER.ImageBase):
                         if insn.mnemonic == 'call':
@@ -1146,7 +1213,6 @@ class NuitkaDumper:
             md.detail = True
 
             call_graph = []
-            ep_rva = self.pe.OPTIONAL_HEADER.AddressOfEntryPoint
 
             for section in self.pe.sections:
                 if not self._is_executable_section(section):
@@ -1210,6 +1276,66 @@ class NuitkaDumper:
             self.logger.info(f"  String xrefs found: {len(all_xrefs)}")
         except Exception as e:
             self.logger.warning(f"  Xrefs failed: {e}")
+
+    def _dump_import_xrefs(self):
+        if capstone is None:
+            return
+        if not self.pe:
+            return
+        if not self.import_name_by_address:
+            return
+        self.logger.info("Building import cross-references...")
+        xrefs_dir = self.output_dir / "Disasm" / "xrefs"
+
+        try:
+            arch_mode = self._get_arch_mode()
+            md = capstone.Cs(capstone.CS_ARCH_X86, arch_mode)
+            md.detail = True
+
+            all_import_xrefs = []
+            seen = set()
+
+            for section in self.pe.sections:
+                if not self._is_executable_section(section):
+                    continue
+                try:
+                    data = section.get_data()
+                    for insn in md.disasm(data, section.VirtualAddress + self.pe.OPTIONAL_HEADER.ImageBase):
+                        if insn.mnemonic == 'call':
+                            for operand in insn.operands:
+                                if operand.type == capstone.x86.X86_OP_MEM and operand.mem.disp > 0:
+                                    target_addr = operand.mem.disp
+                                    if target_addr in self.import_name_by_address:
+                                        key = (insn.address, target_addr)
+                                        if key not in seen:
+                                            seen.add(key)
+                                            import_name = self.import_name_by_address[target_addr]
+                                            all_import_xrefs.append(f"0x{insn.address:016x}: call -> {import_name}")
+                                elif operand.type == capstone.x86.X86_OP_IMM:
+                                    target_addr = operand.imm
+                                    if target_addr in self.import_name_by_address:
+                                        key = (insn.address, target_addr)
+                                        if key not in seen:
+                                            seen.add(key)
+                                            import_name = self.import_name_by_address[target_addr]
+                                            all_import_xrefs.append(f"0x{insn.address:016x}: call -> {import_name}")
+                        if insn.mnemonic == 'jmp':
+                            for operand in insn.operands:
+                                if operand.type == capstone.x86.X86_OP_MEM and operand.mem.disp > 0:
+                                    target_addr = operand.mem.disp
+                                    if target_addr in self.import_name_by_address:
+                                        key = (insn.address, target_addr)
+                                        if key not in seen:
+                                            seen.add(key)
+                                            import_name = self.import_name_by_address[target_addr]
+                                            all_import_xrefs.append(f"0x{insn.address:016x}: jmp -> {import_name}")
+                except:
+                    pass
+
+            self._write_list(xrefs_dir / "import_xrefs.txt", all_import_xrefs[:10000])
+            self.logger.info(f"  Import xrefs found: {len(all_import_xrefs)}")
+        except Exception as e:
+            self.logger.warning(f"  Import xrefs failed: {e}")
 
     def _get_insn_comment(self, insn, code):
         comments = []
@@ -1330,6 +1456,50 @@ class NuitkaDumper:
         else:
             self.logger.info("  No compressed blocks found in .rsrc")
 
+    def _dump_yara_rules(self):
+        self.logger.info("Generating YARA rules...")
+        analysis_dir = self.output_dir / "Analysis"
+
+        try:
+            selected_strings = []
+            raw_strings_for_yara = []
+
+            for s in sorted(set(self.extracted_strings)):
+                if len(s) >= 6 and len(s) <= 128:
+                    if any(c.isalpha() for c in s) and not all(c in string.printable for c in s):
+                        continue
+                    raw_strings_for_yara.append(s)
+
+            raw_strings_for_yara = raw_strings_for_yara[:50]
+
+            for i, s in enumerate(raw_strings_for_yara):
+                escaped = s.replace('\\', '\\\\').replace('"', '\\"')
+                selected_strings.append(f"        $str{i} = \"{escaped}\" ascii wide")
+
+            strings_section = "\n".join(selected_strings) if selected_strings else "        $dummy = \"DeNuitkanizator_AutoGen\" ascii"
+            condition = "any of them" if selected_strings else "$dummy"
+
+            sha256_hash = hashlib.sha256(self.data).hexdigest()
+            filename = self.filepath.name
+            packager = self.detected_packager or "Unknown"
+            date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            yara_rule = YARA_TEMPLATE.format(
+                timestamp=datetime.datetime.now().strftime("%Y%m%d_%H%M%S"),
+                filename=filename,
+                VERSION=VERSION,
+                date=date_str,
+                packager=packager,
+                sha256=sha256_hash,
+                strings=strings_section,
+                condition=condition,
+            )
+
+            (analysis_dir / "yara_rules.yar").write_text(yara_rule, encoding='utf-8')
+            self.logger.info(f"  YARA rule generated with {len(selected_strings)} strings")
+        except Exception as e:
+            self.logger.warning(f"  YARA rule generation failed: {e}")
+
     def _write_log_copy(self):
         try:
             log_dest = self.output_dir / f"{self.output_dir.name}.log"
@@ -1449,6 +1619,7 @@ class NuitkaDumper:
             summary.append(f"Functions:              Disasm/functions/function_addresses.txt")
             summary.append(f"Call graph:             Disasm/xrefs/call_graph.txt")
             summary.append(f"String xrefs:           Disasm/xrefs/string_xrefs.txt")
+            summary.append(f"Import xrefs:           Disasm/xrefs/import_xrefs.txt")
         else:
             summary.append(f"Disassembler:           Not available")
 
@@ -1459,6 +1630,12 @@ class NuitkaDumper:
         summary.append(f"zstd available:         {str(HAS_ZSTD).lower()}")
         summary.append(f"lz4 available:          {str(HAS_LZ4).lower()}")
         summary.append(f"lzma available:         {str(HAS_LZMA).lower()}")
+
+        summary.append("")
+        summary.append("─" * 54)
+        summary.append(" YARA")
+        summary.append("─" * 54)
+        summary.append(f"Rules generated:        Analysis/yara_rules.yar")
 
         summary.append("")
         summary.append("─" * 54)
