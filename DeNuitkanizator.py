@@ -24,8 +24,17 @@ except ImportError:
 
 try:
     import capstone
+    from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_MODE_64
+    from capstone.x86 import X86_OP_REG, X86_OP_IMM, X86_OP_MEM
 except ImportError:
     capstone = None
+    Cs = None
+    CS_ARCH_X86 = None
+    CS_MODE_32 = None
+    CS_MODE_64 = None
+    X86_OP_REG = None
+    X86_OP_IMM = None
+    X86_OP_MEM = None
 
 try:
     import zstandard as zstd
@@ -48,7 +57,7 @@ except ImportError:
 from colorama import init, Fore, Back, Style
 init(autoreset=True)
 
-VERSION = "1.3"
+VERSION = "1.4"
 REPO = "github.com/2M12/DeNuitkanizator"
 GITHUB_API = "https://api.github.com/repos/2M12/DeNuitkanizator/releases/latest"
 
@@ -85,6 +94,109 @@ ANTI_DEBUG_PATTERNS = [
     b'\xcd\x02',
     b'\xcd\x03',
 ]
+
+regsSize = [
+    [['rax', 'eax', 'ax', 'al', 'ah'], {1: 'al', 2: 'ax', 4: 'eax', 8: 'rax'}],
+    [['rbx', 'ebx', 'bx', 'bl', 'bh'], {1: 'bl', 2: 'bx', 4: 'ebx', 8: 'rbx'}],
+    [['rcx', 'ecx', 'cx', 'cl', 'ch'], {1: 'cl', 2: 'cx', 4: 'ecx', 8: 'rcx'}],
+    [['rdx', 'edx', 'dx', 'dl', 'dh'], {1: 'dl', 2: 'dx', 4: 'edx', 8: 'rdx'}],
+    [['rbp', 'ebp', 'bp', 'bpl', 'bph'], {1: 'bpl', 2: 'bp', 4: 'ebp', 8: 'rbp'}],
+    [['rsp', 'esp', 'sp', 'spl', 'sph'], {1: 'spl', 2: 'sp', 4: 'esp', 8: 'rsp'}],
+    [['rsi', 'esi', 'si', 'sil', 'sih'], {1: 'sil', 2: 'si', 4: 'esi', 8: 'rsi'}],
+    [['rdi', 'edi', 'di', 'dil', 'dih'], {1: 'dil', 2: 'di', 4: 'edi', 8: 'rdi'}],
+    [['r8', 'r8d', 'r8w', 'r8b', ''], {1: 'r8b', 2: 'r8w', 4: 'r8d', 8: 'r8'}],
+    [['r9', 'r9d', 'r9w', 'r9b', ''], {1: 'r9b', 2: 'r9w', 4: 'r9d', 8: 'r9'}],
+    [['r10', 'r10d', 'r10w', 'r10b', ''], {1: 'r10b', 2: 'r10w', 4: 'r10d', 8: 'r10'}],
+    [['r11', 'r11d', 'r11w', 'r11b', ''], {1: 'r11b', 2: 'r11w', 4: 'r11d', 8: 'r11'}],
+    [['r12', 'r12d', 'r12w', 'r12b', ''], {1: 'r12b', 2: 'r12w', 4: 'r12d', 8: 'r12'}],
+    [['r13', 'r13d', 'r13w', 'r13b', ''], {1: 'r13b', 2: 'r13w', 4: 'r13d', 8: 'r13'}],
+    [['r14', 'r14d', 'r14w', 'r14b', ''], {1: 'r14b', 2: 'r14w', 4: 'r14d', 8: 'r14'}],
+    [['r15', 'r15d', 'r15w', 'r15b', ''], {1: 'r15b', 2: 'r15w', 4: 'r15d', 8: 'r15'}],
+]
+
+PYOBJECT_FILE_PREFIXES = ['PyList_', 'PyObject_', 'PyModule_', 'PyUnicode_']
+
+ENVIRONMENT_H = '''#include <stdio.h>
+#include <stdint.h>
+#include <inttypes.h>
+#include <stdbool.h>
+
+#define MEMORY_SIZE 1024
+
+bool of = 0, sf = 0, zf = 0, af = 0, pf = 0, cf = 0;
+
+union {
+    uint64_t tmp64;
+    uint32_t tmp32;
+    uint16_t tmp16;
+    uint8_t tmp8;
+} tmp;
+
+#define tmp8 tmp.tmp8
+#define tmp16 tmp.tmp16
+#define tmp32 tmp.tmp32
+#define tmp64 tmp.tmp64
+
+#define MEMORY(T, O) (*((T*)&memory[O]))
+
+#define TMP8(x, op, y)   tmp8  = ((uint8_t)x)  op ((uint8_t)y)
+#define TMP16(x, op, y)  tmp16 = ((uint16_t)x) op ((uint16_t)y)
+#define TMP32(x, op, y)  tmp32 = ((uint32_t)x) op ((uint32_t)y)
+#define TMP64(x, op, y)  tmp64 = ((uint64_t)x) op ((uint64_t)y)
+
+#define SET_ZF(size) zf = !tmp##size
+#define SET_CF_ADD(size, op1)  cf = tmp##size < op1
+#define SET_CF_SUB(op1, op2)   cf = op1 < op2
+#define SET_AF_0(op1, op2) af = ((op1 ^ op2) ^ tmp8) & 0x10
+#define SET_AF_INC(size) af = (tmp##size & 0xf) == 0
+#define SET_AF_DEC(size) af = (tmp##size & 0xf) == 0xf
+#define SET_OF_SUB(op1, op2, size, mask) of = (((((op1) ^ (op2)) & ((op1) ^ (tmp##size))) & (mask)) != 0)
+#define SET_OF_ADD(op1, op2, result, mask) of = (((((op1) ^ (result)) & ((op2) ^ (result))) & (mask)) != 0)
+#define SET_OF_INC_DEC_NEG(size, mask) of = (tmp##size == mask)
+
+uint8_t memory[MEMORY_SIZE] = {0};
+
+struct {
+    union { struct { uint8_t al; uint8_t ah; } __attribute__((packed)); uint16_t ax; uint32_t eax; uint64_t rax; } __attribute__((packed));
+    union { struct { uint8_t bl; uint8_t bh; } __attribute__((packed)); uint16_t bx; uint32_t ebx; uint64_t rbx; } __attribute__((packed));
+    union { struct { uint8_t cl; uint8_t ch; } __attribute__((packed)); uint16_t cx; uint32_t ecx; uint64_t rcx; } __attribute__((packed));
+    union { struct { uint8_t dl; uint8_t dh; } __attribute__((packed)); uint16_t dx; uint32_t edx; uint64_t rdx; } __attribute__((packed));
+    union { struct { uint8_t bpl; uint8_t bph; } __attribute__((packed)); uint16_t bp; uint32_t ebp; uint64_t rbp; } __attribute__((packed));
+} __attribute__((packed)) regs;
+
+#define rax regs.rax
+#define eax regs.eax
+#define  ax regs.ax
+#define  al regs.al
+#define  ah regs.ah
+#define rbx regs.rbx
+#define ebx regs.ebx
+#define  bx regs.bx
+#define  bl regs.bl
+#define  bh regs.bh
+#define rcx regs.rcx
+#define ecx regs.ecx
+#define  cx regs.cx
+#define  cl regs.cl
+#define  ch regs.ch
+#define rdx regs.rdx
+#define edx regs.edx
+#define  dx regs.dx
+#define  dl regs.dl
+#define  dh regs.dh
+#define rbp regs.rbp
+#define ebp regs.ebp
+#define  bp regs.bp
+'''
+
+cTemplate = '''#include "environment.h"
+
+void func() {
+%s}
+
+int main() {
+}
+'''
 
 YARA_TEMPLATE = """rule DeNuitkanizator_AutoGen_{timestamp}
 {{
@@ -190,6 +302,8 @@ class NuitkaDumper:
         self.update_version = None
         self.iat_addresses = {}
         self.import_name_by_address = {}
+        self.pyobj_count = 0
+        self.has_pyobject_files = False
 
     def run(self):
         self._show_banner()
@@ -204,7 +318,6 @@ class NuitkaDumper:
         print(BANNER)
         print(f"{Back.CYAN}{Fore.BLACK} INFO {Style.RESET_ALL} Created by 2M12 on Python 3.11")
         print(f"{Back.CYAN}{Fore.BLACK} INFO {Style.RESET_ALL} This is version {VERSION}", end=" ")
-        
         self.update_status, self.update_version = check_for_updates()
         if self.update_status == "update":
             print(f"{Back.YELLOW}{Fore.BLACK} (New Update Available: v{self.update_version}){Style.RESET_ALL}")
@@ -212,11 +325,10 @@ class NuitkaDumper:
             print(f"{Back.GREEN}{Fore.BLACK} (Latest version){Style.RESET_ALL}")
         else:
             print(f"{Back.RED}{Fore.WHITE} (Offline Mode){Style.RESET_ALL}")
-        
         print(f"{Back.CYAN}{Fore.BLACK} INFO {Style.RESET_ALL} Repository: {REPO}")
         print(f"{Back.CYAN}{Fore.BLACK} INFO {Style.RESET_ALL} Please read the instructions in the repository before using the program.")
         print(f"{Back.YELLOW}{Fore.BLACK} WARNING {Style.RESET_ALL} By using this tool, you agree to the terms in EULA.md (check Repository)")
-        print(f"{Back.YELLOW}{Fore.BLACK} WARNING {Style.RESET_ALL} YARA-the rules are in W.I.P (and packager detection). Expect the v1.3.1 update, where there will be a fix and refinement.")
+        print(f"{Back.YELLOW}{Fore.BLACK} WARNING {Style.RESET_ALL} YARA rules and ASM-to-C translation are W.I.P. Expect improvements in future updates.")
         print()
 
     def _prompt_path(self):
@@ -236,13 +348,11 @@ class NuitkaDumper:
             self._fatal_error(1)
         if not target_path.is_file():
             self._fatal_error(1)
-
         self.data = target_path.read_bytes()
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         base_name = target_path.stem
         self.output_dir = Path.cwd() / "DeNuitkanizator_Output" / f"{base_name}_{ts}"
         self.output_dir.mkdir(parents=True, exist_ok=True)
-
         log_path = self.output_dir / f"{base_name}_{ts}.log"
         self.logger = Logger(str(log_path))
         self.logger.info(f"Output directory: {self.output_dir}")
@@ -254,7 +364,6 @@ class NuitkaDumper:
             self.logger.warning("lz4 not installed. Install: pip install lz4")
         if not HAS_LZMA:
             self.logger.warning("lzma not available. This should be built-in, check your Python installation.")
-
         try:
             self.pe = pefile.PE(data=self.data)
             self.logger.info("PE file detected")
@@ -308,21 +417,22 @@ class NuitkaDumper:
         return False
 
     def _is_executable_section(self, section):
-        characteristics = section.Characteristics
-        return (characteristics & 0x20000000) != 0
+        return (section.Characteristics & 0x20000000) != 0
 
     def _get_arch_mode(self):
         if not self.pe:
-            return capstone.CS_MODE_64
+            return CS_MODE_64
         machine = self.pe.FILE_HEADER.Machine
         if machine == 0x8664:
-            return capstone.CS_MODE_64
+            return CS_MODE_64
         elif machine == 0x014c:
-            return capstone.CS_MODE_32
-        return capstone.CS_MODE_64
+            return CS_MODE_32
+        return CS_MODE_64
 
     def _dump_all(self):
         self._create_dirs()
+        self._extract_python_object_headers()
+        self._check_pyobject_files()
         self._detect_packager()
         self._dump_sections()
         self._dump_overlay()
@@ -331,7 +441,6 @@ class NuitkaDumper:
         self._aggressive_bytecode_search()
         self._extract_frozen_modules()
         self._extract_nuitka_constants()
-        self._extract_python_object_headers()
         self._extract_source_paths()
         self._extract_variable_names()
         self._extract_nuitka_onefile_payload()
@@ -340,6 +449,7 @@ class NuitkaDumper:
         self._dump_entropy()
         self._dump_disasm()
         self._dump_disasm_full()
+        self._dump_disasm_to_c()
         self._dump_disasm_functions()
         self._dump_xrefs()
         self._dump_import_xrefs()
@@ -359,7 +469,7 @@ class NuitkaDumper:
             "Dumps/bytecode/3.10", "Dumps/bytecode/3.11",
             "Dumps/memory/py_objects", "Dumps/memory/nuitka_structs",
             "Dumps/frozen_modules", "Dumps/payloads",
-            "Strings/suspicious", "Info", "Disasm/xrefs", "Disasm/full", "Disasm/functions",
+            "Strings/suspicious", "Info", "Disasm/xrefs", "Disasm/full", "Disasm/functions", "Disasm/code",
             "Analysis",
             "Suspicious/encrypted_blocks", "Suspicious/compressed_blocks",
             "Suspicious/obfuscated_code", "Suspicious/anti_debug",
@@ -370,23 +480,32 @@ class NuitkaDumper:
         for d in dirs:
             (self.output_dir / d).mkdir(parents=True, exist_ok=True)
 
+    def _check_pyobject_files(self):
+        pyobj_dir = self.output_dir / "Dumps" / "memory" / "py_objects"
+        if not pyobj_dir.exists():
+            self.has_pyobject_files = False
+            return
+        for prefix in PYOBJECT_FILE_PREFIXES:
+            matching = list(pyobj_dir.glob(f"{prefix}*.bin"))
+            if matching:
+                self.has_pyobject_files = True
+                return
+        self.has_pyobject_files = False
+
     def _detect_packager(self):
         self.logger.info("Detecting packager...")
         nuitka_hits = 0
         for sig in NUITKA_SIGNATURES:
             if sig in self.data:
                 nuitka_hits += 1
-
         pyinstaller_hits = 0
         for sig in PYINSTALLER_SIGNATURES:
             if sig in self.data:
                 pyinstaller_hits += 1
-
         cx_freeze_hits = 0
         for sig in CX_FREEZE_SIGNATURES:
             if sig in self.data:
                 cx_freeze_hits += 1
-
         has_python_dlls = False
         if self.pe and hasattr(self.pe, 'DIRECTORY_ENTRY_IMPORT'):
             for entry in self.pe.DIRECTORY_ENTRY_IMPORT:
@@ -394,7 +513,6 @@ class NuitkaDumper:
                 if 'python' in dll_name:
                     has_python_dlls = True
                     break
-
         if nuitka_hits >= 1:
             self.detected_packager = "Nuitka"
             self.detected_nuitka = True
@@ -403,10 +521,10 @@ class NuitkaDumper:
             self.detected_packager = "Nuitka (detected by .rsrc entropy)"
             self.detected_nuitka = True
             self.logger.info(f"  Detected: Nuitka (high entropy .rsrc: {self.rsrc_entropy:.2f}/8.0, size: {len(self.rsrc_data):,} bytes)")
-        elif pyinstaller_hits >= 1 and has_python_dlls:
+        elif pyinstaller_hits >= 1 and (has_python_dlls or self.has_pyobject_files):
             self.detected_packager = "PyInstaller"
             self.detected_pyinstaller = True
-            self.logger.info(f"  Detected: PyInstaller ({pyinstaller_hits} signatures matched, Python DLL found)")
+            self.logger.info(f"  Detected: PyInstaller ({pyinstaller_hits} signatures matched, Python DLL: {has_python_dlls}, PyObject files: {self.has_pyobject_files})")
         elif cx_freeze_hits >= 1:
             self.detected_packager = "cx_Freeze"
             self.detected_cx_freeze = True
@@ -414,7 +532,7 @@ class NuitkaDumper:
         elif pyinstaller_hits >= 1:
             self.detected_packager = "PyInstaller (low confidence)"
             self.detected_pyinstaller = True
-            self.logger.warning(f"  Detected: PyInstaller (NOT EXACTLY: signatures matched but no Python DLL found, low confidence)")
+            self.logger.warning(f"  Detected: PyInstaller (NOT EXACTLY: signatures matched but no Python DLL and no PyObject files, low confidence)")
         else:
             self.detected_packager = "Unknown (native or other)"
             self.logger.info("  Packager not identified")
@@ -526,17 +644,14 @@ class NuitkaDumper:
 
     def _dump_string_files(self):
         strings_dir = self.output_dir / "Strings"
-
         ascii4 = []
         ascii8 = []
         utf16le = []
-
         for s in self.extracted_strings:
             if len(s) >= 4:
                 ascii4.append(s)
             if len(s) >= 8:
                 ascii8.append(s)
-
         for match in re.finditer(b'(?:[\x20-\x7e]\x00){4,}', self.data):
             raw = match.group()
             try:
@@ -545,7 +660,6 @@ class NuitkaDumper:
                     utf16le.append(s)
             except:
                 pass
-
         self._write_list(strings_dir / "all_ascii_4.txt", sorted(set(ascii4)))
         self._write_list(strings_dir / "all_ascii_8.txt", sorted(set(ascii8)))
         self._write_list(strings_dir / "all_utf16le.txt", sorted(set(utf16le)))
@@ -565,7 +679,6 @@ class NuitkaDumper:
                     self.extracted_paths.add(p)
             except:
                 pass
-
         url_pattern = re.compile(rb'https?://[\x20-\x7e]{4,}')
         for match in url_pattern.finditer(data):
             try:
@@ -573,7 +686,6 @@ class NuitkaDumper:
                 self.extracted_urls.add(u)
             except:
                 pass
-
         email_pattern = re.compile(rb'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')
         for match in email_pattern.finditer(data):
             try:
@@ -581,7 +693,6 @@ class NuitkaDumper:
                 self.extracted_emails.add(e)
             except:
                 pass
-
         ip_pattern = re.compile(rb'(?:\d{1,3}\.){3}\d{1,3}')
         for match in ip_pattern.finditer(data):
             try:
@@ -591,7 +702,6 @@ class NuitkaDumper:
                     self.extracted_ips.add(ip)
             except:
                 pass
-
         for match in re.finditer(b'[\x20-\x7e]{4,}', data):
             try:
                 s = match.group().decode('ascii', errors='replace')
@@ -599,7 +709,6 @@ class NuitkaDumper:
                     self.extracted_strings.append(s)
             except:
                 pass
-
         module_pattern = re.compile(rb'([A-Za-z0-9_/\\]+\.py)\x00')
         for match in module_pattern.finditer(data):
             try:
@@ -608,7 +717,6 @@ class NuitkaDumper:
                     self.extracted_modules.add(mod)
             except:
                 pass
-
         for magic, ver_name in PYTHON_MAGICS.items():
             offset = data.find(magic)
             if offset != -1:
@@ -621,7 +729,6 @@ class NuitkaDumper:
     def _aggressive_bytecode_search(self):
         self.logger.info("Aggressive bytecode/magic search...")
         bytecode_dir = self.output_dir / "Dumps" / "bytecode"
-
         for magic, ver_name in PYTHON_MAGICS.items():
             for section in self.pe.sections:
                 try:
@@ -638,7 +745,6 @@ class NuitkaDumper:
                         offset += max(len(magic), 1)
                 except:
                     pass
-
         self.logger.info(f"  Bytecode candidates saved: {len(self.found_bytecodes)}")
 
     def _dump_magic_context(self, data, offset, ver_name, bytecode_dir, region_name):
@@ -672,16 +778,13 @@ class NuitkaDumper:
     def _extract_frozen_modules(self):
         self.logger.info("Searching for frozen module names...")
         frozen_dir = self.output_dir / "Dumps" / "frozen_modules"
-
         patterns = [
             rb'([A-Za-z0-9_/\\]+\.py)\x00',
             rb'__frozen__([A-Za-z0-9_]+)',
             rb'frozen_module_([A-Za-z0-9_]+)',
             rb'module_([a-z_]+)_frozen',
         ]
-
         found_modules = set()
-
         for data_source in [self.data, self.rsrc_data]:
             if not data_source:
                 continue
@@ -694,14 +797,12 @@ class NuitkaDumper:
                             found_modules.add((mod_name, mod_offset))
                     except:
                         pass
-
         for mod_name, mod_offset in found_modules:
             mod_end = min(mod_offset + 512, len(self.data))
             chunk = self.data[mod_offset:mod_end]
             safe_name = mod_name.replace('/', '_').replace('\\', '_').replace('.', '_')
             fname = frozen_dir / f"{safe_name}_{mod_offset:08x}.bin"
             fname.write_bytes(chunk)
-
         self.found_frozen_modules = list(found_modules)
         self.logger.info(f"  Frozen module candidates: {len(found_modules)}")
 
@@ -742,6 +843,7 @@ class NuitkaDumper:
                     fname.write_bytes(chunk)
                     total += 1
                 offset += len(pattern)
+        self.pyobj_count = total
         self.logger.info(f"  Python object headers extracted: {total}")
 
     def _extract_source_paths(self):
@@ -752,7 +854,6 @@ class NuitkaDumper:
             rb'(/[A-Za-z0-9_\\/\-\. ]{5,200})',
             rb'([A-Za-z0-9_/\\]{3,}\.py)',
         ]
-
         sections_to_scan = ['.rdata', '.data']
         for section in self.pe.sections:
             name = section.Name.decode('utf-8', errors='replace').strip('\x00')
@@ -770,7 +871,6 @@ class NuitkaDumper:
                                 pass
                 except:
                     pass
-
         self.extracted_paths.update(paths)
         self._write_list(self.output_dir / "Analysis" / "source_paths.txt", sorted(paths))
         self.logger.info(f"  Source paths found: {len(paths)}")
@@ -779,7 +879,6 @@ class NuitkaDumper:
         self.logger.info("Extracting variable/function names...")
         var_patterns = [rb'([a-z_][a-z0-9_]{3,50})\x00']
         names = set()
-
         sections_to_scan = ['.rdata', '.data']
         for section in self.pe.sections:
             name = section.Name.decode('utf-8', errors='replace').strip('\x00')
@@ -796,7 +895,6 @@ class NuitkaDumper:
                                 pass
                 except:
                     pass
-
         names = {n for n in names if not n.startswith('0') and len(n) < 100}
         self._write_list(self.output_dir / "Analysis" / "variable_names.txt", sorted(names)[:5000])
         self.logger.info(f"  Variable names extracted: {len(names)}")
@@ -805,21 +903,17 @@ class NuitkaDumper:
         self.logger.info("Searching for Nuitka OneFile payload...")
         payload_dir = self.output_dir / "Dumps" / "payloads"
         decompressed_count = 0
-
         if self.rsrc_data and len(self.rsrc_data) > 0:
             self.logger.info(f"  Scanning .rsrc section ({len(self.rsrc_data):,} bytes, entropy: {self.rsrc_entropy:.2f}/8.0)")
-
             if HAS_ZSTD:
                 decompressed_count += self._try_zstd_decompress(self.rsrc_data, payload_dir)
             else:
                 self.logger.warning("  zstandard not available, install: pip install zstandard")
-
             decompressed_count += self._try_zlib_decompress(self.rsrc_data, payload_dir, ".rsrc")
             if HAS_LZMA:
                 decompressed_count += self._try_lzma_decompress(self.rsrc_data, payload_dir)
             if HAS_LZ4:
                 decompressed_count += self._try_lz4_decompress(self.rsrc_data, payload_dir)
-
         if decompressed_count == 0:
             self.logger.info("  No payloads decompressed from .rsrc")
         else:
@@ -950,7 +1044,6 @@ class NuitkaDumper:
     def _dump_info(self):
         self.logger.info("Collecting metadata...")
         info_dir = self.output_dir / "Info"
-
         gen_info = []
         if self.pe:
             gen_info.append(f"File type: PE (Portable Executable)")
@@ -963,7 +1056,6 @@ class NuitkaDumper:
             gen_info.append(f"File type: Raw binary")
         gen_info.append(f"File size: {len(self.data):,} bytes ({len(self.data)/1024/1024:.2f} MB)")
         gen_info.append(f"Packager: {self.detected_packager or 'Unknown'}")
-
         pe_end = 0
         if self.pe:
             last = self.pe.sections[-1]
@@ -978,11 +1070,9 @@ class NuitkaDumper:
             gen_info.append(f"Compression ratio: {ratio:.1f}%")
         gen_info.append(f"Timestamp: {datetime.datetime.fromtimestamp(self.pe.FILE_HEADER.TimeDateStamp) if self.pe else 'N/A'}")
         self._write_list(info_dir / "general.txt", gen_info)
-
         if self.pe:
             pe_hdr = self.pe.dump_info()
             (info_dir / "pe_header.txt").write_text(pe_hdr, encoding='utf-8')
-
             sec_info = []
             for sec in self.pe.sections:
                 name = sec.Name.decode('utf-8', errors='replace').strip('\x00')
@@ -990,7 +1080,6 @@ class NuitkaDumper:
                 exec_flag = "EXEC" if self._is_executable_section(sec) else ""
                 sec_info.append(f"{name}: VA=0x{sec.VirtualAddress:08x} RawSize={sec.SizeOfRawData:,} VirtSize={sec.Misc_VirtualSize:,} Entropy={ent:.2f}/8.0 Rights=0x{sec.Characteristics:08x} {exec_flag}")
             self._write_list(info_dir / "sections.txt", sec_info)
-
             imports = []
             if hasattr(self.pe, 'DIRECTORY_ENTRY_IMPORT'):
                 for entry in self.pe.DIRECTORY_ENTRY_IMPORT:
@@ -999,17 +1088,14 @@ class NuitkaDumper:
                         if imp.name:
                             imports.append(f"{dll}: {imp.name.decode('utf-8', errors='replace')}")
             self._write_list(info_dir / "imports.txt", imports)
-
             python_imports = [i for i in imports if 'Py' in i or 'python' in i.lower()]
             self._write_list(info_dir / "imports_python.txt", python_imports)
-
             exports = []
             if hasattr(self.pe, 'DIRECTORY_ENTRY_EXPORT'):
                 for exp in self.pe.DIRECTORY_ENTRY_EXPORT.symbols:
                     if exp.name:
                         exports.append(exp.name.decode('utf-8', errors='replace'))
             self._write_list(info_dir / "exports.txt", exports)
-
             compiler = "Unknown"
             if b'GCC' in self.data or b'MinGW' in self.data or b'gcc' in self.data:
                 compiler = "MinGW GCC"
@@ -1017,7 +1103,6 @@ class NuitkaDumper:
                 compiler = "MSVC"
             elif b'Clang' in self.data or b'LLVM' in self.data:
                 compiler = "Clang/LLVM"
-
             prot = []
             if self.pe.OPTIONAL_HEADER.DllCharacteristics & 0x0100:
                 prot.append("DEP enabled")
@@ -1032,7 +1117,6 @@ class NuitkaDumper:
                 except:
                     pass
             self._write_list(info_dir / "protection.txt", prot)
-
         if self.detected_python:
             (info_dir / "python_version.txt").write_text(f"Python version: {self.detected_python}")
         if self.detected_nuitka:
@@ -1086,17 +1170,14 @@ class NuitkaDumper:
             return
         self.logger.info("Disassembling entry point and code sections...")
         disasm_dir = self.output_dir / "Disasm"
-
         try:
             arch_mode = self._get_arch_mode()
-            md = capstone.Cs(capstone.CS_ARCH_X86, arch_mode)
+            md = Cs(CS_ARCH_X86, arch_mode)
             md.detail = True
-
             ep_rva = self.pe.OPTIONAL_HEADER.AddressOfEntryPoint
             ep_offset = self.pe.get_offset_from_rva(ep_rva)
             if ep_offset is None:
                 ep_offset = self.pe.get_offset_from_rva(ep_rva - self.pe.OPTIONAL_HEADER.ImageBase)
-
             if ep_offset and ep_offset + 4096 <= len(self.data):
                 code = self.data[ep_offset:ep_offset + 4096]
                 lines = []
@@ -1105,7 +1186,6 @@ class NuitkaDumper:
                     lines.append(f"0x{insn.address:x}: {insn.mnemonic:8s} {insn.op_str:30s} {comment}")
                 self._write_list(disasm_dir / "entry_point.asm", lines)
                 self.logger.info(f"  Entry point: {len(lines)} instructions")
-
             for section in self.pe.sections:
                 name = section.Name.decode('utf-8', errors='replace').strip('\x00')
                 if b'.text' in section.Name or name == 'CODE':
@@ -1128,12 +1208,10 @@ class NuitkaDumper:
             return
         self.logger.info("Full disassembly of all executable sections...")
         full_dir = self.output_dir / "Disasm" / "full"
-
         try:
             arch_mode = self._get_arch_mode()
-            md = capstone.Cs(capstone.CS_ARCH_X86, arch_mode)
+            md = Cs(CS_ARCH_X86, arch_mode)
             md.detail = True
-
             for section in self.pe.sections:
                 name = section.Name.decode('utf-8', errors='replace').strip('\x00')
                 if self._is_executable_section(section):
@@ -1151,6 +1229,188 @@ class NuitkaDumper:
         except Exception as e:
             self.logger.warning(f"  Full disassembly failed: {e}")
 
+    def _dump_disasm_to_c(self):
+        if capstone is None:
+            return
+        if not self.pe:
+            return
+        self.logger.info("Translating disassembly to C...")
+        code_dir = self.output_dir / "Disasm" / "code"
+        (code_dir / "environment.h").write_text(ENVIRONMENT_H, encoding='utf-8')
+        arch_mode = self._get_arch_mode()
+        jumps = {'jmp', 'je', 'jne', 'jz', 'jnz', 'jnb', 'jb', 'jbe', 'ja', 'jae', 'jg', 'jge', 'jl', 'jle', 'jo', 'jno', 'js', 'jns', 'jp', 'jnp', 'jcxz', 'jecxz', 'loop', 'loope', 'loopne'}
+        cinstr = {
+            'mov': self._c_mov, 'movzx': self._c_movzx, 'movsx': self._c_movzx,
+            'sub': self._c_sub, 'add': self._c_add, 'inc': self._c_inc, 'dec': self._c_dec,
+            'cmp': self._c_cmp, 'jmp': self._c_jmp, 'jne': self._c_jne, 'je': self._c_je,
+            'jnb': self._c_jnb, 'jb': self._c_jb, 'jbe': self._c_jbe,
+        }
+        for section in self.pe.sections:
+            name = section.Name.decode('utf-8', errors='replace').strip('\x00')
+            if not self._is_executable_section(section):
+                continue
+            try:
+                data = section.get_data()
+                md = Cs(CS_ARCH_X86, arch_mode)
+                md.detail = True
+                instructions = list(md.disasm(data, section.VirtualAddress + self.pe.OPTIONAL_HEADER.ImageBase))
+                jump_places = set()
+                for insn in instructions:
+                    if insn.mnemonic in jumps:
+                        if len(insn.operands) > 0:
+                            try:
+                                target = int(insn.op_str, 16)
+                                jump_places.add(target)
+                            except (ValueError, AttributeError):
+                                pass
+                c_code = ''
+                for insn in instructions:
+                    if insn.address in jump_places:
+                        c_code += f'_0x{insn.address:x}:\n'
+                    if insn.mnemonic in cinstr:
+                        ops = list(insn.operands)
+                        args = [self._build_operand(insn, op) for op in ops]
+                        c_code += cinstr[insn.mnemonic](*args, insn)
+                    else:
+                        c_code += f'    // {insn.mnemonic} {insn.op_str}\n'
+                c_code = cTemplate % c_code
+                fname = code_dir / f"{name}_full.c"
+                fname.write_text(c_code, encoding='utf-8')
+                self.logger.info(f"  Section {name}: C translation written")
+            except Exception as e:
+                self.logger.warning(f"  C translation failed for {name}: {e}")
+
+    def _build_operand(self, instr, operand):
+        if operand.type == X86_OP_REG:
+            reg_name = instr.reg_name(operand.reg)
+            for r in regsSize:
+                if reg_name in r[0]:
+                    return (reg_name, operand.size)
+            return (reg_name, operand.size)
+        if operand.type == X86_OP_MEM:
+            base = instr.reg_name(operand.mem.base) if operand.mem.base else ''
+            index = instr.reg_name(operand.mem.index) if operand.mem.index else ''
+            scale = operand.mem.scale
+            disp = operand.mem.disp
+            out = ''
+            if base:
+                out = base
+            if index:
+                if out:
+                    out += '+'
+                out += f'{index}*{scale}'
+            if disp:
+                if disp < 0:
+                    out += f'-{abs(disp)}'
+                elif disp > 0:
+                    if out:
+                        out += '+'
+                    out += str(disp)
+                else:
+                    if not out:
+                        out = '0'
+            if not out:
+                out = '0'
+            return (f'MEMORY({out})', operand.size)
+        if operand.type == X86_OP_IMM:
+            return (str(operand.imm), operand.size)
+        return ('?', operand.size)
+
+    def _get_reg(self, reg_name, size):
+        for r in regsSize:
+            if reg_name in r[0]:
+                return r[1].get(size, reg_name)
+        return reg_name
+
+    def _get_val(self, op):
+        name, size = op
+        if name.startswith('MEMORY'):
+            return name
+        try:
+            int(name, 16)
+            return name
+        except (ValueError, TypeError):
+            pass
+        return self._get_reg(name, size)
+
+    def _c_mov(self, left, right, inst):
+        l = self._get_val(left)
+        r = self._get_val(right)
+        return f'    {l} = {r}; // {inst.mnemonic} {inst.op_str}\n'
+
+    def _c_movzx(self, left, right, inst):
+        l = self._get_val(left)
+        r = self._get_val(right)
+        return f'    {l} = 0; {l} = {r}; // {inst.mnemonic} {inst.op_str}\n'
+
+    def _c_sub(self, left, right, inst, is_cmp=False):
+        l = self._get_val(left)
+        r = self._get_val(right)
+        size = left[1] * 8
+        actions = '' if is_cmp else f'    {l} = tmp{size};\n'
+        return f'    TMP{size}({l}, -, {r}); // {inst.mnemonic} {inst.op_str}\n{actions}'
+
+    def _c_add(self, left, right, inst):
+        l = self._get_val(left)
+        r = self._get_val(right)
+        size = left[1] * 8
+        return f'    TMP{size}({l}, +, {r}); // {inst.mnemonic} {inst.op_str}\n    {l} = tmp{size};\n'
+
+    def _c_inc(self, left, inst):
+        l = self._get_val(left)
+        size = left[1] * 8
+        return f'    TMP{size}({l}, +, 1); // {inst.mnemonic} {inst.op_str}\n    {l} = tmp{size};\n'
+
+    def _c_dec(self, left, inst):
+        l = self._get_val(left)
+        size = left[1] * 8
+        return f'    TMP{size}({l}, -, 1); // {inst.mnemonic} {inst.op_str}\n    {l} = tmp{size};\n'
+
+    def _c_cmp(self, left, right, inst):
+        return self._c_sub(left, right, inst, is_cmp=True)
+
+    def _c_jmp(self, op, inst):
+        try:
+            target = int(op[0], 16) if isinstance(op[0], str) and op[0].startswith('0x') else int(op[0])
+            return f'    goto _0x{target:x}; // {inst.mnemonic} {inst.op_str}\n'
+        except (ValueError, TypeError):
+            return f'    // {inst.mnemonic} {inst.op_str}\n'
+
+    def _c_jne(self, op, inst):
+        try:
+            target = int(op[0], 16) if isinstance(op[0], str) and op[0].startswith('0x') else int(op[0])
+            return f'    if(!zf) goto _0x{target:x}; // {inst.mnemonic} {inst.op_str}\n'
+        except (ValueError, TypeError):
+            return f'    // {inst.mnemonic} {inst.op_str}\n'
+
+    def _c_je(self, op, inst):
+        try:
+            target = int(op[0], 16) if isinstance(op[0], str) and op[0].startswith('0x') else int(op[0])
+            return f'    if(zf) goto _0x{target:x}; // {inst.mnemonic} {inst.op_str}\n'
+        except (ValueError, TypeError):
+            return f'    // {inst.mnemonic} {inst.op_str}\n'
+
+    def _c_jb(self, op, inst):
+        try:
+            target = int(op[0], 16) if isinstance(op[0], str) and op[0].startswith('0x') else int(op[0])
+            return f'    if(cf) goto _0x{target:x}; // {inst.mnemonic} {inst.op_str}\n'
+        except (ValueError, TypeError):
+            return f'    // {inst.mnemonic} {inst.op_str}\n'
+
+    def _c_jbe(self, op, inst):
+        try:
+            target = int(op[0], 16) if isinstance(op[0], str) and op[0].startswith('0x') else int(op[0])
+            return f'    if(cf || zf) goto _0x{target:x}; // {inst.mnemonic} {inst.op_str}\n'
+        except (ValueError, TypeError):
+            return f'    // {inst.mnemonic} {inst.op_str}\n'
+
+    def _c_jnb(self, op, inst):
+        try:
+            target = int(op[0], 16) if isinstance(op[0], str) and op[0].startswith('0x') else int(op[0])
+            return f'    if(!cf) goto _0x{target:x}; // {inst.mnemonic} {inst.op_str}\n'
+        except (ValueError, TypeError):
+            return f'    // {inst.mnemonic} {inst.op_str}\n'
+
     def _dump_disasm_functions(self):
         if capstone is None:
             return
@@ -1158,18 +1418,14 @@ class NuitkaDumper:
             return
         self.logger.info("Extracting function boundaries...")
         func_dir = self.output_dir / "Disasm" / "functions"
-
         try:
             arch_mode = self._get_arch_mode()
-            md = capstone.Cs(capstone.CS_ARCH_X86, arch_mode)
+            md = Cs(CS_ARCH_X86, arch_mode)
             md.detail = True
-
             function_starts = set()
-
             if self.pe:
                 ep_rva = self.pe.OPTIONAL_HEADER.AddressOfEntryPoint
                 function_starts.add(ep_rva)
-
             for section in self.pe.sections:
                 if not self._is_executable_section(section):
                     continue
@@ -1192,7 +1448,6 @@ class NuitkaDumper:
                                 pass
                 except:
                     pass
-
             func_list = sorted(function_starts)
             self._write_list(func_dir / "function_addresses.txt", [f"0x{addr:016x}" for addr in func_list])
             self.logger.info(f"  Function candidates: {len(func_list)}")
@@ -1206,14 +1461,11 @@ class NuitkaDumper:
             return
         self.logger.info("Building call graph...")
         cg_dir = self.output_dir / "Disasm" / "xrefs"
-
         try:
             arch_mode = self._get_arch_mode()
-            md = capstone.Cs(capstone.CS_ARCH_X86, arch_mode)
+            md = Cs(CS_ARCH_X86, arch_mode)
             md.detail = True
-
             call_graph = []
-
             for section in self.pe.sections:
                 if not self._is_executable_section(section):
                     continue
@@ -1229,7 +1481,6 @@ class NuitkaDumper:
                                 pass
                 except:
                     pass
-
             self._write_list(cg_dir / "call_graph.txt", call_graph[:10000])
             self.logger.info(f"  Call graph entries: {len(call_graph)}")
         except Exception as e:
@@ -1244,14 +1495,11 @@ class NuitkaDumper:
             return
         self.logger.info("Building cross-references (xrefs)...")
         xrefs_dir = self.output_dir / "Disasm" / "xrefs"
-
         try:
             arch_mode = self._get_arch_mode()
-            md = capstone.Cs(capstone.CS_ARCH_X86, arch_mode)
+            md = Cs(CS_ARCH_X86, arch_mode)
             md.detail = True
-
             all_xrefs = []
-
             for section in self.pe.sections:
                 if not self._is_executable_section(section):
                     continue
@@ -1260,7 +1508,7 @@ class NuitkaDumper:
                     for insn in md.disasm(data, section.VirtualAddress + self.pe.OPTIONAL_HEADER.ImageBase):
                         if insn.mnemonic in ['lea', 'mov', 'push']:
                             for operand in insn.operands:
-                                if operand.type == capstone.x86.X86_OP_MEM and operand.mem.disp > 0:
+                                if operand.type == X86_OP_MEM and operand.mem.disp > 0:
                                     disp = operand.mem.disp
                                     image_base = self.pe.OPTIONAL_HEADER.ImageBase
                                     target_rva = disp - image_base
@@ -1271,7 +1519,6 @@ class NuitkaDumper:
                                                     all_xrefs.append(f"0x{insn.address:x}: {insn.mnemonic} {insn.op_str} -> STRING @ 0x{off:x}: \"{s[:60]}\"")
                 except:
                     pass
-
             self._write_list(xrefs_dir / "string_xrefs.txt", all_xrefs[:10000])
             self.logger.info(f"  String xrefs found: {len(all_xrefs)}")
         except Exception as e:
@@ -1286,15 +1533,12 @@ class NuitkaDumper:
             return
         self.logger.info("Building import cross-references...")
         xrefs_dir = self.output_dir / "Disasm" / "xrefs"
-
         try:
             arch_mode = self._get_arch_mode()
-            md = capstone.Cs(capstone.CS_ARCH_X86, arch_mode)
+            md = Cs(CS_ARCH_X86, arch_mode)
             md.detail = True
-
             all_import_xrefs = []
             seen = set()
-
             for section in self.pe.sections:
                 if not self._is_executable_section(section):
                     continue
@@ -1303,7 +1547,7 @@ class NuitkaDumper:
                     for insn in md.disasm(data, section.VirtualAddress + self.pe.OPTIONAL_HEADER.ImageBase):
                         if insn.mnemonic == 'call':
                             for operand in insn.operands:
-                                if operand.type == capstone.x86.X86_OP_MEM and operand.mem.disp > 0:
+                                if operand.type == X86_OP_MEM and operand.mem.disp > 0:
                                     target_addr = operand.mem.disp
                                     if target_addr in self.import_name_by_address:
                                         key = (insn.address, target_addr)
@@ -1311,7 +1555,7 @@ class NuitkaDumper:
                                             seen.add(key)
                                             import_name = self.import_name_by_address[target_addr]
                                             all_import_xrefs.append(f"0x{insn.address:016x}: call -> {import_name}")
-                                elif operand.type == capstone.x86.X86_OP_IMM:
+                                elif operand.type == X86_OP_IMM:
                                     target_addr = operand.imm
                                     if target_addr in self.import_name_by_address:
                                         key = (insn.address, target_addr)
@@ -1321,7 +1565,7 @@ class NuitkaDumper:
                                             all_import_xrefs.append(f"0x{insn.address:016x}: call -> {import_name}")
                         if insn.mnemonic == 'jmp':
                             for operand in insn.operands:
-                                if operand.type == capstone.x86.X86_OP_MEM and operand.mem.disp > 0:
+                                if operand.type == X86_OP_MEM and operand.mem.disp > 0:
                                     target_addr = operand.mem.disp
                                     if target_addr in self.import_name_by_address:
                                         key = (insn.address, target_addr)
@@ -1331,7 +1575,6 @@ class NuitkaDumper:
                                             all_import_xrefs.append(f"0x{insn.address:016x}: jmp -> {import_name}")
                 except:
                     pass
-
             self._write_list(xrefs_dir / "import_xrefs.txt", all_import_xrefs[:10000])
             self.logger.info(f"  Import xrefs found: {len(all_import_xrefs)}")
         except Exception as e:
@@ -1351,7 +1594,7 @@ class NuitkaDumper:
                     comments.append("[CALL]")
             except:
                 comments.append("[CALL]")
-        elif insn.mnemonic in ['jmp', 'je', 'jne', 'jz', 'jnz', 'jg', 'jl', 'jge', 'jle']:
+        elif insn.mnemonic in {'jmp', 'je', 'jne', 'jz', 'jnz', 'jg', 'jl', 'jge', 'jle'}:
             comments.append("[JMP]")
         elif insn.mnemonic == 'ret':
             comments.append("[RET]")
@@ -1360,30 +1603,25 @@ class NuitkaDumper:
     def _dump_analysis(self):
         self.logger.info("Running analysis...")
         analysis_dir = self.output_dir / "Analysis"
-
         if self.found_bytecodes:
             bc_map = []
             for ver, offset, ctx in self.found_bytecodes:
                 bc_map.append(f"{ver}: offset=0x{offset:08x} context={ctx}")
             self._write_list(analysis_dir / "bytecode_map.txt", bc_map)
-
             versions = Counter(v for v, _, _ in self.found_bytecodes)
             if versions:
                 python_ver = versions.most_common(1)[0][0]
                 self.detected_python = python_ver
                 (analysis_dir / "python_version.txt").write_text(f"Python version: {python_ver}")
-
         if self.found_frozen_modules:
             frozen_list = [f"{name} @ 0x{offset:08x}" for name, offset in self.found_frozen_modules]
             self._write_list(analysis_dir / "frozen_modules.txt", frozen_list)
-
         if self.extracted_modules:
             self._write_list(analysis_dir / "module_list.txt", sorted(self.extracted_modules))
 
     def _dump_suspicious(self):
         self.logger.info("Scanning for suspicious patterns...")
         susp_dir = self.output_dir / "Suspicious"
-
         anti_debug_found = []
         for api in ANTI_DEBUG_APIS:
             if api in self.data:
@@ -1391,7 +1629,6 @@ class NuitkaDumper:
         if anti_debug_found:
             self._write_list(susp_dir / "anti_debug" / "found.txt", anti_debug_found)
             self.logger.warning(f"  Anti-debug APIs: {len(anti_debug_found)} found")
-
         if self.pe:
             packed = []
             for sec in self.pe.sections:
@@ -1402,7 +1639,6 @@ class NuitkaDumper:
                         packed.append(f"{name}: raw={sec.SizeOfRawData} virt={sec.Misc_VirtualSize} ratio={ratio:.2f}")
             if packed:
                 self._write_list(susp_dir / "packed_sections" / "packed.txt", packed)
-
         high_entropy_blocks = []
         if self.pe:
             for sec in self.pe.sections:
@@ -1420,14 +1656,12 @@ class NuitkaDumper:
     def _dump_compressed_blocks(self):
         self.logger.info("Scanning for compressed blocks in .rsrc only...")
         comp_dir = self.output_dir / "Suspicious" / "compressed_blocks"
-
         comp_signatures = {
             b'\x78\x9c': 'zlib_default', b'\x78\x01': 'zlib_none',
             b'\x78\xda': 'zlib_best', b'\x1f\x8b\x08': 'gzip',
             b'BZh': 'bzip2', b'\xfd7zXZ\x00': 'lzma',
             b'\x50\x4b\x03\x04': 'zip', b'\x04\x22\x4d\x18': 'lz4',
         }
-
         search_data = self.rsrc_data if self.rsrc_data else self.data
         found = []
         for sig, name in comp_signatures.items():
@@ -1449,7 +1683,6 @@ class NuitkaDumper:
                 except:
                     pass
                 offset += len(sig)
-
         if found:
             self._write_list(comp_dir / "found.txt", found)
             self.logger.info(f"  Compressed blocks in .rsrc: {len(found)}")
@@ -1459,31 +1692,24 @@ class NuitkaDumper:
     def _dump_yara_rules(self):
         self.logger.info("Generating YARA rules...")
         analysis_dir = self.output_dir / "Analysis"
-
         try:
             selected_strings = []
             raw_strings_for_yara = []
-
             for s in sorted(set(self.extracted_strings)):
                 if len(s) >= 6 and len(s) <= 128:
                     if any(c.isalpha() for c in s) and not all(c in string.printable for c in s):
                         continue
                     raw_strings_for_yara.append(s)
-
             raw_strings_for_yara = raw_strings_for_yara[:50]
-
             for i, s in enumerate(raw_strings_for_yara):
                 escaped = s.replace('\\', '\\\\').replace('"', '\\"')
                 selected_strings.append(f"        $str{i} = \"{escaped}\" ascii wide")
-
             strings_section = "\n".join(selected_strings) if selected_strings else "        $dummy = \"DeNuitkanizator_AutoGen\" ascii"
             condition = "any of them" if selected_strings else "$dummy"
-
             sha256_hash = hashlib.sha256(self.data).hexdigest()
             filename = self.filepath.name
             packager = self.detected_packager or "Unknown"
             date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
             yara_rule = YARA_TEMPLATE.format(
                 timestamp=datetime.datetime.now().strftime("%Y%m%d_%H%M%S"),
                 filename=filename,
@@ -1494,7 +1720,6 @@ class NuitkaDumper:
                 strings=strings_section,
                 condition=condition,
             )
-
             (analysis_dir / "yara_rules.yar").write_text(yara_rule, encoding='utf-8')
             self.logger.info(f"  YARA rule generated with {len(selected_strings)} strings")
         except Exception as e:
@@ -1522,14 +1747,12 @@ class NuitkaDumper:
         summary.append("─" * 54)
         summary.append(" GENERAL")
         summary.append("─" * 54)
-
         if self.pe:
             summary.append(f"File type:              PE (Portable Executable)")
             summary.append(f"Architecture:           {'x64' if self.pe.FILE_HEADER.Machine == 0x8664 else 'x86'}")
         else:
             summary.append(f"File type:              Raw binary")
         summary.append(f"File size:              {len(self.data):,} bytes ({len(self.data)/1024/1024:.2f} MB)")
-
         pe_end = 0
         if self.pe:
             last = self.pe.sections[-1]
@@ -1542,7 +1765,6 @@ class NuitkaDumper:
         if len(self.data) > 0:
             ratio = payload / len(self.data) * 100 if payload > 0 else 0
             summary.append(f"Compression ratio:      {ratio:.1f}%")
-
         summary.append("")
         summary.append("─" * 54)
         summary.append(" HASHES")
@@ -1550,7 +1772,6 @@ class NuitkaDumper:
         summary.append(f"MD5:        {hashlib.md5(self.data).hexdigest()}")
         summary.append(f"SHA1:       {hashlib.sha1(self.data).hexdigest()}")
         summary.append(f"SHA256:     {hashlib.sha256(self.data).hexdigest()}")
-
         summary.append("")
         summary.append("─" * 54)
         summary.append(" PACKER")
@@ -1565,7 +1786,6 @@ class NuitkaDumper:
             elif b'MSVC' in self.data:
                 compiler = "MSVC"
         summary.append(f"Compiler:               {compiler}")
-
         summary.append("")
         summary.append("─" * 54)
         summary.append(" BYTECODE / MAGIC")
@@ -1576,7 +1796,6 @@ class NuitkaDumper:
             count = sum(1 for v, _, _ in self.found_bytecodes if v == ver)
             if count > 0:
                 summary.append(f"  {ver}:                 {count} contexts")
-
         summary.append("")
         summary.append("─" * 54)
         summary.append(" FROZEN MODULES")
@@ -1584,7 +1803,6 @@ class NuitkaDumper:
         summary.append(f"Found:                  {len(self.found_frozen_modules)} candidates")
         for name, _ in self.found_frozen_modules[:10]:
             summary.append(f"  {name}")
-
         summary.append("")
         summary.append("─" * 54)
         summary.append(" STRINGS / MODULES")
@@ -1594,7 +1812,6 @@ class NuitkaDumper:
         summary.append(f"IPs found:              {len(self.extracted_ips)}")
         summary.append(f"URLs found:             {len(self.extracted_urls)}")
         summary.append(f"Paths found:            {len(self.extracted_paths)}")
-
         summary.append("")
         summary.append("─" * 54)
         summary.append(" SECTIONS")
@@ -1608,7 +1825,6 @@ class NuitkaDumper:
                 except:
                     ent = 0.0
                 summary.append(f"{name:<12} {sec.SizeOfRawData:>10,}  {ent:.1f}")
-
         summary.append("")
         summary.append("─" * 54)
         summary.append(" DISASM")
@@ -1616,13 +1832,13 @@ class NuitkaDumper:
         if capstone:
             summary.append(f"Disassembler:           Capstone (active)")
             summary.append(f"Full disasm:            Disasm/full/")
+            summary.append(f"C translation:          Disasm/code/")
             summary.append(f"Functions:              Disasm/functions/function_addresses.txt")
             summary.append(f"Call graph:             Disasm/xrefs/call_graph.txt")
             summary.append(f"String xrefs:           Disasm/xrefs/string_xrefs.txt")
             summary.append(f"Import xrefs:           Disasm/xrefs/import_xrefs.txt")
         else:
             summary.append(f"Disassembler:           Not available")
-
         summary.append("")
         summary.append("─" * 54)
         summary.append(" COMPRESSION")
@@ -1630,13 +1846,11 @@ class NuitkaDumper:
         summary.append(f"zstd available:         {str(HAS_ZSTD).lower()}")
         summary.append(f"lz4 available:          {str(HAS_LZ4).lower()}")
         summary.append(f"lzma available:         {str(HAS_LZMA).lower()}")
-
         summary.append("")
         summary.append("─" * 54)
         summary.append(" YARA")
         summary.append("─" * 54)
         summary.append(f"Rules generated:        Analysis/yara_rules.yar")
-
         summary.append("")
         summary.append("─" * 54)
         summary.append(" WARNINGS")
@@ -1656,7 +1870,6 @@ class NuitkaDumper:
             summary.append("[WARNING] zstandard not installed. Install: pip install zstandard")
         if not HAS_LZ4:
             summary.append("[WARNING] lz4 not installed. Install: pip install lz4")
-
         summary.append("")
         summary.append("─" * 54)
         summary.append(" OUTPUT")
@@ -1666,7 +1879,6 @@ class NuitkaDumper:
         summary.append("─" * 54)
         summary.append(" EXIT CODE: 0 (Success)")
         summary.append("─" * 54)
-
         (self.output_dir / "summary.txt").write_text("\n".join(summary), encoding='utf-8')
 
     def _write_list(self, path, items):
