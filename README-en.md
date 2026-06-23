@@ -10,7 +10,7 @@
   ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)
   ![Nuitka](https://img.shields.io/badge/Nuitka-Analyzer-2D2D2D?style=for-the-badge&logo=python&logoColor=white)
   ![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
-  ![Version](https://img.shields.io/badge/version-1.3-blue)
+  ![Version](https://img.shields.io/badge/version-1.4.1-blue)
   ![GitHub commit activity](https://img.shields.io/github/commit-activity/m/2M12/DeNuitkanizator?style=for-the-badge)
 ![GitHub stars](https://img.shields.io/github/stars/2M12/DeNuitkanizator?style=for-the-badge)
 ![GitHub watchers](https://img.shields.io/github/watchers/2M12/DeNuitkanizator?style=for-the-badge)
@@ -96,6 +96,18 @@
 * **Entry Point**: with comments `[CALL]`, `[JMP]`, `[RET]`, `[ANTI-DEBUG]`.
 * **Auto‑architecture detection**: x86 or x64 from the PE header.
 * **String cross‑references** (`string_xrefs.txt`): which code references which strings.
+* **Asm-to-C** technology translation: now (`.text_full.asm`) is fully translated into readable C code. Inspired by the line-by-line translation tool [cisol](https://github.com/rdbv/cisol)
+* **The basis of Asm-to-C** technology: Registers, stack (`push`/`pop`), flags (`ZF`, `CF`, `OF`, `SF`, `PF`, `AF`) are emulated. Function calls are also emulated via `goto` tags.
+
+>[!NOTE]
+> ### 🔄 Asm-To-C
+> **Asm-To-C** technology for translating assembly code (x86/x64) into readable C code. It is based on line-by-line conversion of instructions: each assembler instruction is translated into an equivalent C macro that emulates the operation of registers, stack, flags (ZF, CF, OF, SF, PF, AF) and memory.
+>
+>Function calls are emulated via goto tags, push/pop via stack macros. The technology is inspired by the [cisol](https://github.com/rdbv/cisol) and adapted for integration into DeNuitkanizator.
+>**Output format:** readable C code with comments that preserve the original assembly instructions. It is intended for analyzing and understanding the logic of binary code, not for compilation.
+><p align="center">
+>  <img src="AsmToC.jpg" width="256" alt="Asm-to-C Technology">
+></p>
 
 ### ⚠️ Suspicious element detection
 * **Anti‑debug API**: `IsDebuggerPresent`, `CheckRemoteDebuggerPresent`, etc.
@@ -168,8 +180,8 @@ python DeNuitkanizator.py
 
 ## ☑️ Hash sums
 ```bash
-MD5    022b55d6369e79276110fade6b959e52
-SHA-256   51baf1745c3ccf28c29cc6c196609fc94bb85d1f867117ab4040dcf0f3ecba93
+MD5	9984ef4da97f05801b7078e772fab3c0
+SHA-256	5d901821547962ade6aac3b91ff1f9dd24b9cf5def14e73adc19f368242af5f9
 ```
 ## 📜 License
 MIT © 2026 Mikhail (2M12) / ThreatBit
