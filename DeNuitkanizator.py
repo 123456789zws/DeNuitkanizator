@@ -57,7 +57,7 @@ except ImportError:
 from colorama import init, Fore, Back, Style
 init(autoreset=True)
 
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 REPO = "github.com/2M12/DeNuitkanizator"
 GITHUB_API = "https://api.github.com/repos/2M12/DeNuitkanizator/releases/latest"
 
@@ -97,12 +97,6 @@ ANTI_DEBUG_PATTERNS = [
 
 PYOBJECT_FILE_PREFIXES = ['PyList_', 'PyObject_', 'PyModule_', 'PyUnicode_']
 
-REGS_64 = ['rax', 'rbx', 'rcx', 'rdx', 'rsi', 'rdi', 'rbp', 'rsp', 'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15']
-REGS_32 = ['eax', 'ebx', 'ecx', 'edx', 'esi', 'edi', 'ebp', 'esp', 'r8d', 'r9d', 'r10d', 'r11d', 'r12d', 'r13d', 'r14d', 'r15d']
-REGS_16 = ['ax', 'bx', 'cx', 'dx', 'si', 'di', 'bp', 'sp', 'r8w', 'r9w', 'r10w', 'r11w', 'r12w', 'r13w', 'r14w', 'r15w']
-REGS_8 = ['al', 'bl', 'cl', 'dl', 'sil', 'dil', 'bpl', 'spl', 'r8b', 'r9b', 'r10b', 'r11b', 'r12b', 'r13b', 'r14b', 'r15b', 'ah', 'bh', 'ch', 'dh']
-ALL_REGS = REGS_64 + REGS_32 + REGS_16 + REGS_8
-
 regsSize = [
     [['rax', 'eax', 'ax', 'al', 'ah'], {1: 'al', 2: 'ax', 4: 'eax', 8: 'rax'}],
     [['rbx', 'ebx', 'bx', 'bl', 'bh'], {1: 'bl', 2: 'bx', 4: 'ebx', 8: 'rbx'}],
@@ -122,6 +116,9 @@ regsSize = [
     [['r15', 'r15d', 'r15w', 'r15b', ''], {1: 'r15b', 2: 'r15w', 4: 'r15d', 8: 'r15'}],
 ]
 
+XMM_REGS = ['xmm0', 'xmm1', 'xmm2', 'xmm3', 'xmm4', 'xmm5', 'xmm6', 'xmm7',
+            'xmm8', 'xmm9', 'xmm10', 'xmm11', 'xmm12', 'xmm13', 'xmm14', 'xmm15']
+
 ENVIRONMENT_H = '''#include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
@@ -137,6 +134,15 @@ union {
     uint16_t tmp16;
     uint8_t tmp8;
 } tmp;
+
+union {
+    double d;
+    float f[2];
+    uint64_t u64;
+    uint32_t u32[2];
+    uint16_t u16[4];
+    uint8_t u8[8];
+} xmm[16];
 
 #define tmp8 tmp.tmp8
 #define tmp16 tmp.tmp16
@@ -166,6 +172,11 @@ union {
 #define PUSH32(v) do { esp -= 4; MEMORY(uint32_t, esp) = v; } while(0)
 #define POP64() (rsp += 8, MEMORY(uint64_t, rsp-8))
 #define POP32() (esp += 4, MEMORY(uint32_t, esp-4))
+
+#define BSR(v, dst) do { dst = 63 - __builtin_clzll(v); } while(0)
+#define BSF(v, dst) do { dst = __builtin_ctzll(v); } while(0)
+
+typedef struct { uint64_t lo; int64_t hi; } i128_t;
 
 uint8_t memory[MEMORY_SIZE] = {0};
 
@@ -1272,7 +1283,7 @@ class NuitkaDumper:
                 md = Cs(CS_ARCH_X86, arch_mode)
                 md.detail = True
                 instructions = list(md.disasm(data, section.VirtualAddress + self.pe.OPTIONAL_HEADER.ImageBase))
-                cg = CGenerator(instructions, self.pe.OPTIONAL_HEADER.ImageBase if self.pe else 0, arch_mode)
+                cg = CGenerator(instructions, self.pe.OPTIONAL_HEADER.ImageBase if self.pe else 0, arch_mode, self.import_name_by_address)
                 c_code = cg.generate()
                 c_code = cTemplate % c_code
                 fname = code_dir / f"{name}_full.c"
@@ -1772,10 +1783,11 @@ class NuitkaDumper:
 
 
 class CGenerator:
-    def __init__(self, instructions, image_base, arch_mode):
+    def __init__(self, instructions, image_base, arch_mode, import_names=None):
         self.instructions = instructions
         self.image_base = image_base
         self.arch_mode = arch_mode
+        self.import_names = import_names or {}
         self.c_code = ''
         self.jump_places = set()
         self.translated = 0
@@ -1799,29 +1811,77 @@ class CGenerator:
                     except (ValueError, AttributeError):
                         pass
 
+    def _resolve_iat_addr(self, insn, op):
+        if op.type == X86_OP_MEM and op.mem.disp:
+            addr = op.mem.disp
+            if addr in self.import_names:
+                return self.import_names[addr]
+        if op.type == X86_OP_IMM and op.imm:
+            addr = op.imm
+            if addr in self.import_names:
+                return self.import_names[addr]
+        return None
+
     def generate(self):
+        rep_prefix = None
         for insn in self.instructions:
             if insn.address in self.jump_places:
                 self.c_code += f'_0x{insn.address:x}:\n'
-            handler = self._get_handler(insn.mnemonic)
+            mnemonic = insn.mnemonic
+            if mnemonic in ('rep', 'repe', 'repne'):
+                rep_prefix = mnemonic
+                self.c_code += f'    /* {mnemonic} */\n'
+                self.commented += 1
+                continue
+            if rep_prefix and mnemonic in ('stosb', 'stosw', 'stosd', 'stosq', 'movsb', 'movsw', 'movsd', 'movsq'):
+                ops = list(insn.operands)
+                handler = self._get_rep_handler(mnemonic, rep_prefix)
+                if handler:
+                    try:
+                        self.c_code += handler(insn, ops)
+                        self.translated += 1
+                    except:
+                        self.c_code += f'    /* rep {mnemonic} {insn.op_str} */\n'
+                        self.commented += 1
+                rep_prefix = None
+                continue
+            rep_prefix = None
+            handler = self._get_handler(mnemonic)
             if handler:
                 ops = list(insn.operands)
                 try:
                     self.c_code += handler(insn, ops)
                     self.translated += 1
                 except Exception:
-                    self.c_code += f'    /* {insn.mnemonic} {insn.op_str} */\n'
+                    self.c_code += f'    /* {mnemonic} {insn.op_str} */\n'
                     self.commented += 1
             else:
-                self.c_code += f'    /* {insn.mnemonic} {insn.op_str} */\n'
+                self.c_code += f'    /* {mnemonic} {insn.op_str} */\n'
                 self.commented += 1
         return self.c_code
+
+    def _get_rep_handler(self, mnemonic, rep_prefix):
+        handlers = {
+            ('stosb', 'rep'): self._h_rep_stosb,
+            ('stosw', 'rep'): self._h_rep_stosw,
+            ('stosd', 'rep'): self._h_rep_stosd,
+            ('stosq', 'rep'): self._h_rep_stosq,
+            ('movsb', 'rep'): self._h_rep_movsb,
+            ('movsw', 'rep'): self._h_rep_movsw,
+            ('movsd', 'rep'): self._h_rep_movsd,
+            ('movsq', 'rep'): self._h_rep_movsq,
+        }
+        return handlers.get((mnemonic, rep_prefix))
 
     def _get_handler(self, mnemonic):
         handlers = {
             'mov': self._h_mov, 'movzx': self._h_movzx, 'movsx': self._h_movsx,
+            'movaps': self._h_movaps, 'movups': self._h_movups,
+            'movdqa': self._h_movdqa, 'movdqu': self._h_movdqu,
             'lea': self._h_lea, 'xchg': self._h_xchg,
             'push': self._h_push, 'pop': self._h_pop,
+            'pusha': self._h_pusha, 'popa': self._h_popa,
+            'enter': self._h_enter, 'leave': self._h_leave,
             'sub': self._h_sub, 'add': self._h_add, 'inc': self._h_inc, 'dec': self._h_dec,
             'neg': self._h_neg, 'not': self._h_not,
             'and': self._h_and, 'or': self._h_or, 'xor': self._h_xor,
@@ -1833,17 +1893,36 @@ class CGenerator:
             'jb': self._h_jb, 'jbe': self._h_jbe, 'ja': self._h_ja, 'jae': self._h_jae,
             'jg': self._h_jg, 'jge': self._h_jge, 'jl': self._h_jl, 'jle': self._h_jle,
             'jo': self._h_jo, 'jno': self._h_jno, 'js': self._h_js, 'jns': self._h_jns,
+            'jp': self._h_jp, 'jnp': self._h_jnp,
             'sete': self._h_sete, 'setne': self._h_setne, 'setb': self._h_setb, 'setbe': self._h_setbe,
             'seta': self._h_seta, 'setae': self._h_setae, 'setg': self._h_setg, 'setge': self._h_setge,
             'setl': self._h_setl, 'setle': self._h_setle,
+            'seto': self._h_seto, 'setno': self._h_setno, 'sets': self._h_sets, 'setns': self._h_setns,
             'cmovz': self._h_cmovz, 'cmovnz': self._h_cmovnz, 'cmovb': self._h_cmovb, 'cmovbe': self._h_cmovbe,
             'cmova': self._h_cmova, 'cmovae': self._h_cmovae, 'cmovg': self._h_cmovg, 'cmovge': self._h_cmovge,
             'cmovl': self._h_cmovl, 'cmovle': self._h_cmovle,
+            'cmovo': self._h_cmovo, 'cmovno': self._h_cmovno, 'cmovs': self._h_cmovs, 'cmovns': self._h_cmovns,
+            'cmovp': self._h_cmovp, 'cmovnp': self._h_cmovnp, 'cmovne': self._h_cmovnz,
             'nop': self._h_nop, 'int3': self._h_int3,
             'cbw': self._h_cbw, 'cwde': self._h_cwde, 'cdqe': self._h_cdqe, 'cwd': self._h_cwd, 'cdq': self._h_cdq, 'cqo': self._h_cqo,
             'stosb': self._h_stosb, 'stosw': self._h_stosw, 'stosd': self._h_stosd, 'stosq': self._h_stosq,
             'movsb': self._h_movsb, 'movsw': self._h_movsw, 'movsd': self._h_movsd, 'movsq': self._h_movsq,
-            'rep': self._h_rep, 'repe': self._h_rep, 'repne': self._h_rep,
+            'bsr': self._h_bsr, 'bsf': self._h_bsf,
+            'bswap': self._h_bswap,
+            'bt': self._h_bt, 'bts': self._h_bts, 'btr': self._h_btr, 'btc': self._h_btc,
+            'xorps': self._h_xorps, 'xorpd': self._h_xorpd, 'pxor': self._h_pxor,
+            'addps': self._h_addps, 'addpd': self._h_addpd,
+            'mulps': self._h_mulps, 'mulpd': self._h_mulpd,
+            'cvtsi2sd': self._h_cvtsi2sd, 'cvttsd2si': self._h_cvttsd2si,
+            'cvtsd2ss': self._h_cvtsd2ss, 'cvtss2sd': self._h_cvtss2sd,
+            'syscall': self._h_syscall, 'cpuid': self._h_cpuid,
+            'rdtsc': self._h_rdtsc, 'rdtscp': self._h_rdtscp,
+            'xlat': self._h_xlat, 'xlatb': self._h_xlat,
+            'fld': self._h_fld, 'fst': self._h_fst, 'fstp': self._h_fstp,
+            'fadd': self._h_fadd, 'fmul': self._h_fmul, 'fdiv': self._h_fdiv,
+            'fcom': self._h_fcom, 'fldz': self._h_fldz, 'fld1': self._h_fld1,
+            'fild': self._h_fild, 'fistp': self._h_fistp,
+            'loop': self._h_loop, 'loope': self._h_loope, 'loopne': self._h_loopne,
         }
         return handlers.get(mnemonic)
 
@@ -1874,7 +1953,7 @@ class CGenerator:
             addr = ''.join(parts)
             return f'MEMORY(uint{op.size*8}_t, {addr})'
         return '?'
-    
+
     def _op_to_c_val(self, insn, op):
         if op.type == X86_OP_REG:
             return self._reg_name(insn, op.reg)
@@ -1887,419 +1966,618 @@ class CGenerator:
     def _reg_name(self, insn, reg_id):
         if reg_id is None:
             return ''
+        return insn.reg_name(reg_id)
+
+    def _xmm_name(self, insn, reg_id):
+        if reg_id is None:
+            return ''
         name = insn.reg_name(reg_id)
         return name
 
-    def _size_bits(self, op):
-        if op.type == X86_OP_REG:
-            for r in regsSize:
-                if self._reg_name(None, op.reg) in r[0]:
-                    return op.size * 8
-            return op.size * 8
-        return op.size * 8
+    def _xmm_idx(self, name):
+        for r in XMM_REGS:
+            if name == r:
+                return XMM_REGS.index(r)
+        return 0
 
     def _h_mov(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
-        return f'    {dst} = {src}; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    {dst} = {src};\n'
 
     def _h_movzx(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
-        return f'    {dst} = (uint{ops[0].size*8}_t){src}; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    {dst} = (uint{ops[0].size*8}_t){src};\n'
 
     def _h_movsx(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
-        return f'    {dst} = (int{ops[0].size*8}_t)(int{ops[1].size*8}_t){src}; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    {dst} = (int{ops[0].size*8}_t)(int{ops[1].size*8}_t){src};\n'
+
+    def _h_movaps(self, insn, ops):
+        d = self._xmm_idx(self._xmm_name(insn, ops[0].reg))
+        s = self._xmm_name(insn, ops[1].reg)
+        if ops[1].type == X86_OP_REG:
+            return f'    xmm[{d}].u64 = xmm[{self._xmm_idx(s)}].u64; xmm[{d}+1] = xmm[{self._xmm_idx(s)}+1];\n'
+        return f'    /* movaps {insn.op_str} */\n'
+
+    def _h_movups(self, insn, ops):
+        return self._h_movaps(insn, ops)
+
+    def _h_movdqa(self, insn, ops):
+        return self._h_movaps(insn, ops)
+
+    def _h_movdqu(self, insn, ops):
+        return self._h_movaps(insn, ops)
 
     def _h_lea(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c(insn, ops[1])
-        return f'    {dst} = (uint64_t)&{src}; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    {dst} = (uint64_t)&{src};\n'
 
     def _h_xchg(self, insn, ops):
         a = self._op_to_c(insn, ops[0])
         b = self._op_to_c_val(insn, ops[1])
-        return f'    do {{ typeof({a}) _tmp = {a}; {a} = {b}; {b} = _tmp; }} while(0); /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    do {{ typeof({a}) _tmp = {a}; {a} = {b}; {b} = _tmp; }} while(0);\n'
 
     def _h_push(self, insn, ops):
         val = self._op_to_c_val(insn, ops[0])
-        return f'    PUSH64({val}); /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    PUSH64({val});\n'
 
     def _h_pop(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
-        return f'    {dst} = POP64(); /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    {dst} = POP64();\n'
+
+    def _h_pusha(self, insn, ops):
+        return '    PUSH64(rax); PUSH64(rbx); PUSH64(rcx); PUSH64(rdx); PUSH64(rbp); PUSH64(rsi); PUSH64(rdi);\n'
+
+    def _h_popa(self, insn, ops):
+        return '    rdi = POP64(); rsi = POP64(); rbp = POP64(); rdx = POP64(); rcx = POP64(); rbx = POP64(); rax = POP64();\n'
+
+    def _h_enter(self, insn, ops):
+        return '    PUSH64(rbp); rbp = rsp; rsp -= ' + str(ops[1].imm if len(ops) > 1 else 0) + ';\n'
+
+    def _h_leave(self, insn, ops):
+        return '    rsp = rbp; rbp = POP64();\n'
 
     def _h_sub(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
         s = ops[0].size * 8
         mask = hex(ofMask.get(ops[0].size, 0))
-        return f'    TMP{s}({dst}, -, {src}); SET_ZF({s}); SET_CF_SUB({dst}, {src}); SET_AF_0({dst}, {src}); SET_OF_SUB({dst}, {src}, {s}, {mask}); SET_SF({s}); SET_PF(); {dst} = tmp{s}; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    TMP{s}({dst}, -, {src}); SET_ZF({s}); SET_CF_SUB({dst}, {src}); SET_AF_0({dst}, {src}); SET_OF_SUB({dst}, {src}, {s}, {mask}); SET_SF({s}); SET_PF(); {dst} = tmp{s};\n'
 
     def _h_add(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
         s = ops[0].size * 8
         mask = hex(ofMask.get(ops[0].size, 0))
-        return f'    TMP{s}({dst}, +, {src}); SET_ZF({s}); SET_CF_ADD({s}, {dst}); SET_AF_0({dst}, {src}); SET_OF_ADD({dst}, {src}, tmp{s}, {mask}); SET_SF({s}); SET_PF(); {dst} = tmp{s}; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    TMP{s}({dst}, +, {src}); SET_ZF({s}); SET_CF_ADD({s}, {dst}); SET_AF_0({dst}, {src}); SET_OF_ADD({dst}, {src}, tmp{s}, {mask}); SET_SF({s}); SET_PF(); {dst} = tmp{s};\n'
 
     def _h_inc(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         s = ops[0].size * 8
         mask = hex(ofMask.get(ops[0].size, 0))
-        return f'    TMP{s}({dst}, +, 1); SET_ZF({s}); SET_AF_INC({s}); SET_OF_INC_DEC_NEG({s}, {mask}); SET_SF({s}); SET_PF(); {dst} = tmp{s}; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    TMP{s}({dst}, +, 1); SET_ZF({s}); SET_AF_INC({s}); SET_OF_INC_DEC_NEG({s}, {mask}); SET_SF({s}); SET_PF(); {dst} = tmp{s};\n'
 
     def _h_dec(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         s = ops[0].size * 8
         mask = hex(ofMask.get(ops[0].size, 0) - 1)
-        return f'    TMP{s}({dst}, -, 1); SET_ZF({s}); SET_AF_DEC({s}); SET_OF_INC_DEC_NEG({s}, {mask}); SET_SF({s}); SET_PF(); {dst} = tmp{s}; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    TMP{s}({dst}, -, 1); SET_ZF({s}); SET_AF_DEC({s}); SET_OF_INC_DEC_NEG({s}, {mask}); SET_SF({s}); SET_PF(); {dst} = tmp{s};\n'
 
     def _h_neg(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
-        return f'    {dst} = -{dst}; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    {dst} = -{dst};\n'
 
     def _h_not(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
-        return f'    {dst} = ~{dst}; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    {dst} = ~{dst};\n'
 
     def _h_and(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
         s = ops[0].size * 8
-        return f'    {dst} &= {src}; SET_ZF({s}); SET_SF({s}); SET_PF(); cf = 0; of = 0; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    {dst} &= {src}; SET_ZF({s}); SET_SF({s}); SET_PF(); cf = 0; of = 0;\n'
 
     def _h_or(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
         s = ops[0].size * 8
-        return f'    {dst} |= {src}; SET_ZF({s}); SET_SF({s}); SET_PF(); cf = 0; of = 0; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    {dst} |= {src}; SET_ZF({s}); SET_SF({s}); SET_PF(); cf = 0; of = 0;\n'
 
     def _h_xor(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
         s = ops[0].size * 8
-        return f'    {dst} ^= {src}; SET_ZF({s}); SET_SF({s}); SET_PF(); cf = 0; of = 0; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    {dst} ^= {src}; SET_ZF({s}); SET_SF({s}); SET_PF(); cf = 0; of = 0;\n'
 
     def _h_shl(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
-        return f'    {dst} <<= {src}; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    {dst} <<= {src};\n'
 
     def _h_shr(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
-        return f'    {dst} >>= {src}; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    {dst} >>= {src};\n'
 
     def _h_sar(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
-        return f'    {dst} = (int{ops[0].size*8}_t){dst} >> {src}; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    {dst} = (int{ops[0].size*8}_t){dst} >> {src};\n'
 
     def _h_mul(self, insn, ops):
         src = self._op_to_c_val(insn, ops[0])
         s = ops[0].size * 8
-        return f'    tmp{s} = (uint{s}_t)rax * (uint{s}_t){src}; rax = tmp{s}; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    tmp{s} = (uint{s}_t)rax * (uint{s}_t){src}; rax = tmp{s};\n'
 
     def _h_imul(self, insn, ops):
         if len(ops) == 1:
             src = self._op_to_c_val(insn, ops[0])
             s = ops[0].size * 8
-            return f'    tmp{s*2} = (int{s}_t)rax * (int{s}_t){src}; rax = (uint{s}_t)tmp{s*2}; rdx = (uint{s}_t)(tmp{s*2} >> {s}); /* {insn.mnemonic} {insn.op_str} */\n'
+            return f'    tmp{s*2} = (int{s}_t)rax * (int{s}_t){src}; rax = (uint{s}_t)tmp{s*2}; rdx = (uint{s}_t)(tmp{s*2} >> {s});\n'
         elif len(ops) == 2:
             dst = self._op_to_c(insn, ops[0])
             src = self._op_to_c_val(insn, ops[1])
-            s = ops[0].size * 8
-            return f'    {dst} *= {src}; /* {insn.mnemonic} {insn.op_str} */\n'
+            return f'    {dst} *= {src};\n'
         else:
             dst = self._op_to_c(insn, ops[0])
             src1 = self._op_to_c_val(insn, ops[1])
             src2 = self._op_to_c_val(insn, ops[2])
-            return f'    {dst} = {src1} * {src2}; /* {insn.mnemonic} {insn.op_str} */\n'
+            return f'    {dst} = {src1} * {src2};\n'
 
     def _h_div(self, insn, ops):
         src = self._op_to_c_val(insn, ops[0])
         s = ops[0].size * 8
-        return f'    rax = (uint{s}_t)(((uint{s*2}_t)rdx << {s}) | (uint{s}_t)rax) / (uint{s}_t){src}; rdx = (uint{s}_t)(((uint{s*2}_t)rdx << {s}) | (uint{s}_t)rax) % (uint{s}_t){src}; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    rax = (uint{s}_t)(((uint{s*2}_t)rdx << {s}) | (uint{s}_t)rax) / (uint{s}_t){src}; rdx = (uint{s}_t)(((uint{s*2}_t)rdx << {s}) | (uint{s}_t)rax) % (uint{s}_t){src};\n'
 
     def _h_idiv(self, insn, ops):
         src = self._op_to_c_val(insn, ops[0])
         s = ops[0].size * 8
-        return f'    rax = (int{s}_t)(((int{s*2}_t)rdx << {s}) | (uint{s}_t)rax) / (int{s}_t){src}; rdx = (int{s}_t)(((int{s*2}_t)rdx << {s}) | (uint{s}_t)rax) % (int{s}_t){src}; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    rax = (int{s}_t)(((int{s*2}_t)rdx << {s}) | (uint{s}_t)rax) / (int{s}_t){src}; rdx = (int{s}_t)(((int{s*2}_t)rdx << {s}) | (uint{s}_t)rax) % (int{s}_t){src};\n'
 
     def _h_cmp(self, insn, ops):
         a = self._op_to_c_val(insn, ops[0])
         b = self._op_to_c_val(insn, ops[1])
         s = ops[0].size * 8
         mask = hex(ofMask.get(ops[0].size, 0))
-        return f'    TMP{s}({a}, -, {b}); SET_ZF({s}); SET_CF_SUB({a}, {b}); SET_AF_0({a}, {b}); SET_OF_SUB({a}, {b}, {s}, {mask}); SET_SF({s}); SET_PF(); /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    TMP{s}({a}, -, {b}); SET_ZF({s}); SET_CF_SUB({a}, {b}); SET_AF_0({a}, {b}); SET_OF_SUB({a}, {b}, {s}, {mask}); SET_SF({s}); SET_PF();\n'
 
     def _h_test(self, insn, ops):
         a = self._op_to_c_val(insn, ops[0])
         b = self._op_to_c_val(insn, ops[1])
         s = ops[0].size * 8
-        return f'    tmp{s} = {a} & {b}; SET_ZF({s}); SET_SF({s}); SET_PF(); cf = 0; of = 0; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    tmp{s} = {a} & {b}; SET_ZF({s}); SET_SF({s}); SET_PF(); cf = 0; of = 0;\n'
 
     def _h_call(self, insn, ops):
         if len(ops) > 0:
+            op = ops[0]
+            iat_name = self._resolve_iat_addr(insn, op)
+            if iat_name:
+                return f'    /* call -> {iat_name} */\n'
             try:
                 target = int(insn.op_str, 16)
-                return f'    /* call 0x{target:x} */ PUSH64((uint64_t)&&_ret_{insn.address:x}); goto _0x{target:x}; _ret_{insn.address:x}:;\n'
+                return f'    PUSH64((uint64_t)&&_ret_{insn.address:x}); goto _0x{target:x}; _ret_{insn.address:x}:;\n'
             except (ValueError, AttributeError):
                 pass
             return f'    /* call {insn.op_str} */\n'
-        return f'    /* call */\n'
+        return '    /* call */\n'
 
     def _h_ret(self, insn, ops):
         return '    goto _end;\n'
 
     def _h_jmp(self, insn, ops):
+        op = ops[0]
+        iat_name = self._resolve_iat_addr(insn, op)
+        if iat_name:
+            return f'    /* jmp -> {iat_name} */\n'
         try:
             target = int(insn.op_str, 16)
-            return f'    goto _0x{target:x}; /* {insn.mnemonic} {insn.op_str} */\n'
+            return f'    goto _0x{target:x};\n'
         except (ValueError, AttributeError):
             return f'    /* {insn.mnemonic} {insn.op_str} */\n'
 
     def _h_je(self, insn, ops):
         try:
             target = int(insn.op_str, 16)
-            return f'    if(zf) goto _0x{target:x}; /* {insn.mnemonic} {insn.op_str} */\n'
+            return f'    if(zf) goto _0x{target:x};\n'
         except:
             return f'    /* {insn.mnemonic} {insn.op_str} */\n'
 
     def _h_jne(self, insn, ops):
         try:
             target = int(insn.op_str, 16)
-            return f'    if(!zf) goto _0x{target:x}; /* {insn.mnemonic} {insn.op_str} */\n'
+            return f'    if(!zf) goto _0x{target:x};\n'
         except:
             return f'    /* {insn.mnemonic} {insn.op_str} */\n'
 
     def _h_jb(self, insn, ops):
         try:
             target = int(insn.op_str, 16)
-            return f'    if(cf) goto _0x{target:x}; /* {insn.mnemonic} {insn.op_str} */\n'
+            return f'    if(cf) goto _0x{target:x};\n'
         except:
             return f'    /* {insn.mnemonic} {insn.op_str} */\n'
 
     def _h_jbe(self, insn, ops):
         try:
             target = int(insn.op_str, 16)
-            return f'    if(cf || zf) goto _0x{target:x}; /* {insn.mnemonic} {insn.op_str} */\n'
+            return f'    if(cf || zf) goto _0x{target:x};\n'
         except:
             return f'    /* {insn.mnemonic} {insn.op_str} */\n'
 
     def _h_ja(self, insn, ops):
         try:
             target = int(insn.op_str, 16)
-            return f'    if(!cf && !zf) goto _0x{target:x}; /* {insn.mnemonic} {insn.op_str} */\n'
+            return f'    if(!cf && !zf) goto _0x{target:x};\n'
         except:
             return f'    /* {insn.mnemonic} {insn.op_str} */\n'
 
     def _h_jae(self, insn, ops):
         try:
             target = int(insn.op_str, 16)
-            return f'    if(!cf) goto _0x{target:x}; /* {insn.mnemonic} {insn.op_str} */\n'
+            return f'    if(!cf) goto _0x{target:x};\n'
         except:
             return f'    /* {insn.mnemonic} {insn.op_str} */\n'
 
     def _h_jg(self, insn, ops):
         try:
             target = int(insn.op_str, 16)
-            return f'    if(!zf && sf == of) goto _0x{target:x}; /* {insn.mnemonic} {insn.op_str} */\n'
+            return f'    if(!zf && sf == of) goto _0x{target:x};\n'
         except:
             return f'    /* {insn.mnemonic} {insn.op_str} */\n'
 
     def _h_jge(self, insn, ops):
         try:
             target = int(insn.op_str, 16)
-            return f'    if(sf == of) goto _0x{target:x}; /* {insn.mnemonic} {insn.op_str} */\n'
+            return f'    if(sf == of) goto _0x{target:x};\n'
         except:
             return f'    /* {insn.mnemonic} {insn.op_str} */\n'
 
     def _h_jl(self, insn, ops):
         try:
             target = int(insn.op_str, 16)
-            return f'    if(sf != of) goto _0x{target:x}; /* {insn.mnemonic} {insn.op_str} */\n'
+            return f'    if(sf != of) goto _0x{target:x};\n'
         except:
             return f'    /* {insn.mnemonic} {insn.op_str} */\n'
 
     def _h_jle(self, insn, ops):
         try:
             target = int(insn.op_str, 16)
-            return f'    if(zf || sf != of) goto _0x{target:x}; /* {insn.mnemonic} {insn.op_str} */\n'
+            return f'    if(zf || sf != of) goto _0x{target:x};\n'
         except:
             return f'    /* {insn.mnemonic} {insn.op_str} */\n'
 
     def _h_jo(self, insn, ops):
         try:
             target = int(insn.op_str, 16)
-            return f'    if(of) goto _0x{target:x}; /* {insn.mnemonic} {insn.op_str} */\n'
+            return f'    if(of) goto _0x{target:x};\n'
         except:
             return f'    /* {insn.mnemonic} {insn.op_str} */\n'
 
     def _h_jno(self, insn, ops):
         try:
             target = int(insn.op_str, 16)
-            return f'    if(!of) goto _0x{target:x}; /* {insn.mnemonic} {insn.op_str} */\n'
+            return f'    if(!of) goto _0x{target:x};\n'
         except:
             return f'    /* {insn.mnemonic} {insn.op_str} */\n'
 
     def _h_js(self, insn, ops):
         try:
             target = int(insn.op_str, 16)
-            return f'    if(sf) goto _0x{target:x}; /* {insn.mnemonic} {insn.op_str} */\n'
+            return f'    if(sf) goto _0x{target:x};\n'
         except:
             return f'    /* {insn.mnemonic} {insn.op_str} */\n'
 
     def _h_jns(self, insn, ops):
         try:
             target = int(insn.op_str, 16)
-            return f'    if(!sf) goto _0x{target:x}; /* {insn.mnemonic} {insn.op_str} */\n'
+            return f'    if(!sf) goto _0x{target:x};\n'
+        except:
+            return f'    /* {insn.mnemonic} {insn.op_str} */\n'
+
+    def _h_jp(self, insn, ops):
+        try:
+            target = int(insn.op_str, 16)
+            return f'    if(pf) goto _0x{target:x};\n'
+        except:
+            return f'    /* {insn.mnemonic} {insn.op_str} */\n'
+
+    def _h_jnp(self, insn, ops):
+        try:
+            target = int(insn.op_str, 16)
+            return f'    if(!pf) goto _0x{target:x};\n'
         except:
             return f'    /* {insn.mnemonic} {insn.op_str} */\n'
 
     def _h_sete(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
-        return f'    {dst} = zf; /* {insn.mnemonic} {insn.op_str} */\n'
-
+        return f'    {dst} = zf;\n'
     def _h_setne(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
-        return f'    {dst} = !zf; /* {insn.mnemonic} {insn.op_str} */\n'
-
+        return f'    {dst} = !zf;\n'
     def _h_setb(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
-        return f'    {dst} = cf; /* {insn.mnemonic} {insn.op_str} */\n'
-
+        return f'    {dst} = cf;\n'
     def _h_setbe(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
-        return f'    {dst} = cf || zf; /* {insn.mnemonic} {insn.op_str} */\n'
-
+        return f'    {dst} = cf || zf;\n'
     def _h_seta(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
-        return f'    {dst} = !cf && !zf; /* {insn.mnemonic} {insn.op_str} */\n'
-
+        return f'    {dst} = !cf && !zf;\n'
     def _h_setae(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
-        return f'    {dst} = !cf; /* {insn.mnemonic} {insn.op_str} */\n'
-
+        return f'    {dst} = !cf;\n'
     def _h_setg(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
-        return f'    {dst} = !zf && sf == of; /* {insn.mnemonic} {insn.op_str} */\n'
-
+        return f'    {dst} = !zf && sf == of;\n'
     def _h_setge(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
-        return f'    {dst} = sf == of; /* {insn.mnemonic} {insn.op_str} */\n'
-
+        return f'    {dst} = sf == of;\n'
     def _h_setl(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
-        return f'    {dst} = sf != of; /* {insn.mnemonic} {insn.op_str} */\n'
-
+        return f'    {dst} = sf != of;\n'
     def _h_setle(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
-        return f'    {dst} = zf || sf != of; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    {dst} = zf || sf != of;\n'
+    def _h_seto(self, insn, ops):
+        dst = self._op_to_c(insn, ops[0])
+        return f'    {dst} = of;\n'
+    def _h_setno(self, insn, ops):
+        dst = self._op_to_c(insn, ops[0])
+        return f'    {dst} = !of;\n'
+    def _h_sets(self, insn, ops):
+        dst = self._op_to_c(insn, ops[0])
+        return f'    {dst} = sf;\n'
+    def _h_setns(self, insn, ops):
+        dst = self._op_to_c(insn, ops[0])
+        return f'    {dst} = !sf;\n'
 
     def _h_cmovz(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
-        return f'    if(zf) {dst} = {src}; /* {insn.mnemonic} {insn.op_str} */\n'
-
+        return f'    if(zf) {dst} = {src};\n'
     def _h_cmovnz(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
-        return f'    if(!zf) {dst} = {src}; /* {insn.mnemonic} {insn.op_str} */\n'
-
+        return f'    if(!zf) {dst} = {src};\n'
     def _h_cmovb(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
-        return f'    if(cf) {dst} = {src}; /* {insn.mnemonic} {insn.op_str} */\n'
-
+        return f'    if(cf) {dst} = {src};\n'
     def _h_cmovbe(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
-        return f'    if(cf || zf) {dst} = {src}; /* {insn.mnemonic} {insn.op_str} */\n'
-
+        return f'    if(cf || zf) {dst} = {src};\n'
     def _h_cmova(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
-        return f'    if(!cf && !zf) {dst} = {src}; /* {insn.mnemonic} {insn.op_str} */\n'
-
+        return f'    if(!cf && !zf) {dst} = {src};\n'
     def _h_cmovae(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
-        return f'    if(!cf) {dst} = {src}; /* {insn.mnemonic} {insn.op_str} */\n'
-
+        return f'    if(!cf) {dst} = {src};\n'
     def _h_cmovg(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
-        return f'    if(!zf && sf == of) {dst} = {src}; /* {insn.mnemonic} {insn.op_str} */\n'
-
+        return f'    if(!zf && sf == of) {dst} = {src};\n'
     def _h_cmovge(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
-        return f'    if(sf == of) {dst} = {src}; /* {insn.mnemonic} {insn.op_str} */\n'
-
+        return f'    if(sf == of) {dst} = {src};\n'
     def _h_cmovl(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
-        return f'    if(sf != of) {dst} = {src}; /* {insn.mnemonic} {insn.op_str} */\n'
-
+        return f'    if(sf != of) {dst} = {src};\n'
     def _h_cmovle(self, insn, ops):
         dst = self._op_to_c(insn, ops[0])
         src = self._op_to_c_val(insn, ops[1])
-        return f'    if(zf || sf != of) {dst} = {src}; /* {insn.mnemonic} {insn.op_str} */\n'
+        return f'    if(zf || sf != of) {dst} = {src};\n'
+    def _h_cmovo(self, insn, ops):
+        dst = self._op_to_c(insn, ops[0])
+        src = self._op_to_c_val(insn, ops[1])
+        return f'    if(of) {dst} = {src};\n'
+    def _h_cmovno(self, insn, ops):
+        dst = self._op_to_c(insn, ops[0])
+        src = self._op_to_c_val(insn, ops[1])
+        return f'    if(!of) {dst} = {src};\n'
+    def _h_cmovs(self, insn, ops):
+        dst = self._op_to_c(insn, ops[0])
+        src = self._op_to_c_val(insn, ops[1])
+        return f'    if(sf) {dst} = {src};\n'
+    def _h_cmovns(self, insn, ops):
+        dst = self._op_to_c(insn, ops[0])
+        src = self._op_to_c_val(insn, ops[1])
+        return f'    if(!sf) {dst} = {src};\n'
+    def _h_cmovp(self, insn, ops):
+        dst = self._op_to_c(insn, ops[0])
+        src = self._op_to_c_val(insn, ops[1])
+        return f'    if(pf) {dst} = {src};\n'
+    def _h_cmovnp(self, insn, ops):
+        dst = self._op_to_c(insn, ops[0])
+        src = self._op_to_c_val(insn, ops[1])
+        return f'    if(!pf) {dst} = {src};\n'
 
     def _h_nop(self, insn, ops):
         return '    /* nop */\n'
 
     def _h_int3(self, insn, ops):
-        return '    /* int3 (breakpoint) */\n'
+        return '\n    /* ——— function boundary ——— */\n\n'
 
     def _h_cbw(self, insn, ops):
-        return '    ax = (int16_t)(int8_t)al; /* cbw */\n'
-
+        return '    ax = (int16_t)(int8_t)al;\n'
     def _h_cwde(self, insn, ops):
-        return '    eax = (int32_t)(int16_t)ax; /* cwde */\n'
-
+        return '    eax = (int32_t)(int16_t)ax;\n'
     def _h_cdqe(self, insn, ops):
-        return '    rax = (int64_t)(int32_t)eax; /* cdqe */\n'
-
+        return '    rax = (int64_t)(int32_t)eax;\n'
     def _h_cwd(self, insn, ops):
-        return '    dx = (int16_t)((int16_t)ax < 0 ? 0xffff : 0); /* cwd */\n'
-
+        return '    dx = (int16_t)((int16_t)ax < 0 ? 0xffff : 0);\n'
     def _h_cdq(self, insn, ops):
-        return '    edx = (int32_t)((int32_t)eax < 0 ? 0xffffffff : 0); /* cdq */\n'
-
+        return '    edx = (int32_t)((int32_t)eax < 0 ? 0xffffffff : 0);\n'
     def _h_cqo(self, insn, ops):
-        return '    rdx = (int64_t)((int64_t)rax < 0 ? 0xffffffffffffffff : 0); /* cqo */\n'
+        return '    rdx = (int64_t)((int64_t)rax < 0 ? 0xffffffffffffffff : 0);\n'
 
     def _h_stosb(self, insn, ops):
-        return '    MEMORY(uint8_t, rdi) = al; rdi++; /* stosb */\n'
-
+        return '    MEMORY(uint8_t, rdi) = al; rdi++;\n'
     def _h_stosw(self, insn, ops):
-        return '    MEMORY(uint16_t, rdi) = ax; rdi += 2; /* stosw */\n'
-
+        return '    MEMORY(uint16_t, rdi) = ax; rdi += 2;\n'
     def _h_stosd(self, insn, ops):
-        return '    MEMORY(uint32_t, rdi) = eax; rdi += 4; /* stosd */\n'
-
+        return '    MEMORY(uint32_t, rdi) = eax; rdi += 4;\n'
     def _h_stosq(self, insn, ops):
-        return '    MEMORY(uint64_t, rdi) = rax; rdi += 8; /* stosq */\n'
-
+        return '    MEMORY(uint64_t, rdi) = rax; rdi += 8;\n'
     def _h_movsb(self, insn, ops):
-        return '    MEMORY(uint8_t, rdi) = MEMORY(uint8_t, rsi); rdi++; rsi++; /* movsb */\n'
-
+        return '    MEMORY(uint8_t, rdi) = MEMORY(uint8_t, rsi); rdi++; rsi++;\n'
     def _h_movsw(self, insn, ops):
-        return '    MEMORY(uint16_t, rdi) = MEMORY(uint16_t, rsi); rdi += 2; rsi += 2; /* movsw */\n'
-
+        return '    MEMORY(uint16_t, rdi) = MEMORY(uint16_t, rsi); rdi += 2; rsi += 2;\n'
     def _h_movsd(self, insn, ops):
-        return '    MEMORY(uint32_t, rdi) = MEMORY(uint32_t, rsi); rdi += 4; rsi += 4; /* movsd */\n'
-
+        return '    MEMORY(uint32_t, rdi) = MEMORY(uint32_t, rsi); rdi += 4; rsi += 4;\n'
     def _h_movsq(self, insn, ops):
-        return '    MEMORY(uint64_t, rdi) = MEMORY(uint64_t, rsi); rdi += 8; rsi += 8; /* movsq */\n'
+        return '    MEMORY(uint64_t, rdi) = MEMORY(uint64_t, rsi); rdi += 8; rsi += 8;\n'
 
-    def _h_rep(self, insn, ops):
-        return '    /* rep prefix */\n'
+    def _h_rep_stosb(self, insn, ops):
+        return '    while(rcx--) { MEMORY(uint8_t, rdi) = al; rdi++; }\n'
+    def _h_rep_stosw(self, insn, ops):
+        return '    while(rcx--) { MEMORY(uint16_t, rdi) = ax; rdi += 2; }\n'
+    def _h_rep_stosd(self, insn, ops):
+        return '    while(rcx--) { MEMORY(uint32_t, rdi) = eax; rdi += 4; }\n'
+    def _h_rep_stosq(self, insn, ops):
+        return '    while(rcx--) { MEMORY(uint64_t, rdi) = rax; rdi += 8; }\n'
+    def _h_rep_movsb(self, insn, ops):
+        return '    while(rcx--) { MEMORY(uint8_t, rdi) = MEMORY(uint8_t, rsi); rdi++; rsi++; }\n'
+    def _h_rep_movsw(self, insn, ops):
+        return '    while(rcx--) { MEMORY(uint16_t, rdi) = MEMORY(uint16_t, rsi); rdi += 2; rsi += 2; }\n'
+    def _h_rep_movsd(self, insn, ops):
+        return '    while(rcx--) { MEMORY(uint32_t, rdi) = MEMORY(uint32_t, rsi); rdi += 4; rsi += 4; }\n'
+    def _h_rep_movsq(self, insn, ops):
+        return '    while(rcx--) { MEMORY(uint64_t, rdi) = MEMORY(uint64_t, rsi); rdi += 8; rsi += 8; }\n'
+
+    def _h_bsr(self, insn, ops):
+        dst = self._op_to_c(insn, ops[0])
+        src = self._op_to_c_val(insn, ops[1])
+        return f'    BSR({src}, {dst});\n'
+    def _h_bsf(self, insn, ops):
+        dst = self._op_to_c(insn, ops[0])
+        src = self._op_to_c_val(insn, ops[1])
+        return f'    BSF({src}, {dst});\n'
+
+    def _h_bswap(self, insn, ops):
+        dst = self._op_to_c(insn, ops[0])
+        return f'    {dst} = __builtin_bswap{ops[0].size*8}({dst});\n'
+
+    def _h_bt(self, insn, ops):
+        a = self._op_to_c_val(insn, ops[0])
+        b = self._op_to_c_val(insn, ops[1])
+        return f'    cf = ({a} >> ({b} % {ops[0].size*8})) & 1;\n'
+    def _h_bts(self, insn, ops):
+        a = self._op_to_c(insn, ops[0])
+        b = self._op_to_c_val(insn, ops[1])
+        return f'    cf = ({a} >> ({b} % {ops[0].size*8})) & 1; {a} |= (1ULL << ({b} % {ops[0].size*8}));\n'
+    def _h_btr(self, insn, ops):
+        a = self._op_to_c(insn, ops[0])
+        b = self._op_to_c_val(insn, ops[1])
+        return f'    cf = ({a} >> ({b} % {ops[0].size*8})) & 1; {a} &= ~(1ULL << ({b} % {ops[0].size*8}));\n'
+    def _h_btc(self, insn, ops):
+        a = self._op_to_c(insn, ops[0])
+        b = self._op_to_c_val(insn, ops[1])
+        return f'    cf = ({a} >> ({b} % {ops[0].size*8})) & 1; {a} ^= (1ULL << ({b} % {ops[0].size*8}));\n'
+
+    def _h_xorps(self, insn, ops):
+        d = self._xmm_idx(self._xmm_name(insn, ops[0].reg))
+        return f'    xmm[{d}].u64 = 0; xmm[{d}+1].u64 = 0;\n'
+    def _h_xorpd(self, insn, ops):
+        return self._h_xorps(insn, ops)
+    def _h_pxor(self, insn, ops):
+        return self._h_xorps(insn, ops)
+
+    def _h_addps(self, insn, ops):
+        d = self._xmm_idx(self._xmm_name(insn, ops[0].reg))
+        s = self._xmm_idx(self._xmm_name(insn, ops[1].reg))
+        return f'    xmm[{d}].f[0] += xmm[{s}].f[0]; xmm[{d}].f[1] += xmm[{s}].f[1];\n'
+    def _h_addpd(self, insn, ops):
+        d = self._xmm_idx(self._xmm_name(insn, ops[0].reg))
+        s = self._xmm_idx(self._xmm_name(insn, ops[1].reg))
+        return f'    xmm[{d}].d += xmm[{s}].d;\n'
+
+    def _h_mulps(self, insn, ops):
+        d = self._xmm_idx(self._xmm_name(insn, ops[0].reg))
+        s = self._xmm_idx(self._xmm_name(insn, ops[1].reg))
+        return f'    xmm[{d}].f[0] *= xmm[{s}].f[0]; xmm[{d}].f[1] *= xmm[{s}].f[1];\n'
+    def _h_mulpd(self, insn, ops):
+        d = self._xmm_idx(self._xmm_name(insn, ops[0].reg))
+        s = self._xmm_idx(self._xmm_name(insn, ops[1].reg))
+        return f'    xmm[{d}].d *= xmm[{s}].d;\n'
+
+    def _h_cvtsi2sd(self, insn, ops):
+        d = self._xmm_idx(self._xmm_name(insn, ops[0].reg))
+        src = self._op_to_c_val(insn, ops[1])
+        return f'    xmm[{d}].d = (double)(int64_t){src};\n'
+    def _h_cvttsd2si(self, insn, ops):
+        dst = self._op_to_c(insn, ops[0])
+        s = self._xmm_idx(self._xmm_name(insn, ops[1].reg))
+        return f'    {dst} = (int{ops[0].size*8}_t)xmm[{s}].d;\n'
+    def _h_cvtsd2ss(self, insn, ops):
+        d = self._xmm_idx(self._xmm_name(insn, ops[0].reg))
+        s = self._xmm_idx(self._xmm_name(insn, ops[1].reg))
+        return f'    xmm[{d}].f[0] = (float)xmm[{s}].d;\n'
+    def _h_cvtss2sd(self, insn, ops):
+        d = self._xmm_idx(self._xmm_name(insn, ops[0].reg))
+        s = self._xmm_idx(self._xmm_name(insn, ops[1].reg))
+        return f'    xmm[{d}].d = (double)xmm[{s}].f[0];\n'
+
+    def _h_syscall(self, insn, ops):
+        return '    /* syscall */\n'
+    def _h_cpuid(self, insn, ops):
+        return '    /* cpuid */\n'
+    def _h_rdtsc(self, insn, ops):
+        return '    /* rdtsc */\n'
+    def _h_rdtscp(self, insn, ops):
+        return '    /* rdtscp */\n'
+
+    def _h_xlat(self, insn, ops):
+        return '    al = MEMORY(uint8_t, rbx + al);\n'
+
+    def _h_fld(self, insn, ops):
+        return f'    /* fld {insn.op_str} */\n'
+    def _h_fst(self, insn, ops):
+        return f'    /* fst {insn.op_str} */\n'
+    def _h_fstp(self, insn, ops):
+        return f'    /* fstp {insn.op_str} */\n'
+    def _h_fadd(self, insn, ops):
+        return f'    /* fadd {insn.op_str} */\n'
+    def _h_fmul(self, insn, ops):
+        return f'    /* fmul {insn.op_str} */\n'
+    def _h_fdiv(self, insn, ops):
+        return f'    /* fdiv {insn.op_str} */\n'
+    def _h_fcom(self, insn, ops):
+        return f'    /* fcom {insn.op_str} */\n'
+    def _h_fldz(self, insn, ops):
+        return '    /* fldz */\n'
+    def _h_fld1(self, insn, ops):
+        return '    /* fld1 */\n'
+    def _h_fild(self, insn, ops):
+        return f'    /* fild {insn.op_str} */\n'
+    def _h_fistp(self, insn, ops):
+        return f'    /* fistp {insn.op_str} */\n'
+
+    def _h_loop(self, insn, ops):
+        try:
+            target = int(insn.op_str, 16)
+            return f'    if(--rcx) goto _0x{target:x};\n'
+        except:
+            return f'    /* loop {insn.op_str} */\n'
+    def _h_loope(self, insn, ops):
+        try:
+            target = int(insn.op_str, 16)
+            return f'    if(--rcx && zf) goto _0x{target:x};\n'
+        except:
+            return f'    /* loope {insn.op_str} */\n'
+    def _h_loopne(self, insn, ops):
+        try:
+            target = int(insn.op_str, 16)
+            return f'    if(--rcx && !zf) goto _0x{target:x};\n'
+        except:
+            return f'    /* loopne {insn.op_str} */\n'
 
 
 ofMask = {1: 0x80, 2: 0x8000, 4: 0x80000000, 8: 0x8000000000000000}
