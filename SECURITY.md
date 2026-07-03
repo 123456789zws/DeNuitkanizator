@@ -39,7 +39,6 @@
 >
 > 1. **Не разглашайте информацию публично** до выхода исправления.
 > 2. Используйте [GitHub Security Advisories](https://github.com/2M12/DeNuitkanizator/security/advisories/new).
-> 3. Или свяжитесь через [Дзен ThreatBit](https://dzen.ru/threatbit).
 >
 > В отчёте укажите:
 > * Тип уязвимости
