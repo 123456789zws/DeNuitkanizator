@@ -1,7 +1,7 @@
 <div align="center">
   
 <p align="center">
-  <img src="logo.png" width="256" alt="DeNuitkanizator">
+  <img src="assets/logo.png" width="256" alt="DeNuitkanizator">
 </p>
 
 <br>
@@ -18,7 +18,7 @@
 ![GitHub repo size](https://img.shields.io/github/repo-size/2M12/DeNuitkanizator?style=for-the-badge)
 
 <p align="center">
-  <img src="thumbnail.png" width="700" alt="DeNuitkanizator">
+  <img src="assets/thumbnail.png" width="700" alt="DeNuitkanizator">
 </p>
 
 </div>
@@ -106,7 +106,7 @@
 >Вызовы функций эмулируются через goto-метки, push/pop - через стековые макросы. Технология вдохновлена проектом [cisol](https://github.com/rdbv/cisol) и адаптирована для интеграции в DeNuitkanizator.
 >**Формат вывода:** читаемый C-код с комментариями, в которых сохранены оригинальные ассемблерные инструкции. Предназначен для анализа и понимания логики бинарного кода, а не для компиляции.
 ><p align="center">
->  <img src="AsmToC.jpg" width="256" alt="Asm-to-C Technology">
+>  <img src="assets/AsmToC.jpg" width="256" alt="Asm-to-C Technology">
 ></p>
 
 ### ⚠️ Поиск подозрительных элементов
@@ -122,17 +122,17 @@
 ## 🖼️ Скриншоты
 
 <p align="center">
-  <img src="main_menu.png" width="700" alt="Главное меню">
+  <img src="assets/main_menu.png" width="700" alt="Главное меню">
   <br><em>Главное меню — ввод пути к .exe</em>
 </p>
 
 <p align="center">
-  <img src="analysis_process.png" width="700" alt="Процесс анализа">
+  <img src="assets/analysis_process.png" width="700" alt="Процесс анализа">
   <br><em>Процесс анализа в реальном времени</em>
 </p>
 
 <p align="center">
-  <img src="summary.png" width="700" alt="Итоговый отчёт">
+  <img src="assets/summary.png" width="700" alt="Итоговый отчёт">
   <br><em>Итоговый отчёт summary.txt</em>
 </p>
 
