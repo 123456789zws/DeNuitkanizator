@@ -1,6 +1,6 @@
 <div align="center">
   <p align="center">
-    <img src="logo.png" width="256" alt="DeNuitkanizator">
+    <img src="assets/logo.png" width="256" alt="DeNuitkanizator">
   </p>
 
   <br>
@@ -17,7 +17,7 @@
 ![GitHub repo size](https://img.shields.io/github/repo-size/2M12/DeNuitkanizator?style=for-the-badge)
 
   <p align="center">
-    <img src="thumbnail.png" width="700" alt="DeNuitkanizator">
+    <img src="assets/thumbnail.png" width="700" alt="DeNuitkanizator">
   </p>
 </div>
 
@@ -106,7 +106,7 @@
 >Function calls are emulated via goto tags, push/pop via stack macros. The technology is inspired by the [cisol](https://github.com/rdbv/cisol) and adapted for integration into DeNuitkanizator.
 >**Output format:** readable C code with comments that preserve the original assembly instructions. It is intended for analyzing and understanding the logic of binary code, not for compilation.
 ><p align="center">
->  <img src="AsmToC.jpg" width="256" alt="Asm-to-C Technology">
+>  <img src="assets/AsmToC.jpg" width="256" alt="Asm-to-C Technology">
 ></p>
 
 ### ⚠️ Suspicious element detection
@@ -122,17 +122,17 @@
 ## 🖼️ Screenshots
 
 <p align="center">
-  <img src="main_menu.png" width="700" alt="Main menu">
+  <img src="assets/main_menu.png" width="700" alt="Main menu">
   <br><em>Main menu — entering the path to the .exe</em>
 </p>
 
 <p align="center">
-  <img src="analysis_process.png" width="700" alt="Analysis process">
+  <img src="assets/analysis_process.png" width="700" alt="Analysis process">
   <br><em>Real‑time analysis process</em>
 </p>
 
 <p align="center">
-  <img src="summary.png" width="700" alt="Final report">
+  <img src="assets/summary.png" width="700" alt="Final report">
   <br><em>Final report in summary.txt</em>
 </p>
 
@@ -169,7 +169,7 @@ python DeNuitkanizator.py
 
 ## Example of use
 <p align="center">
-  <img src="example.gif" width="900" alt="DeNuitkanizator Example">
+  <img src="assets/example.gif" width="900" alt="DeNuitkanizator Example">
 </p>
 
 ---
